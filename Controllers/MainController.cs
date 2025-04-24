@@ -57,8 +57,11 @@ namespace Portfolio_server.Controllers
                     return BadRequest(new { message = "Message cannot be empty" });
                 }
 
-                // Call FastAPI service
-                var response = await CallFastApi(request.Message);
+                // Generate a session ID for the user if not exists
+                string sessionId = await GetOrCreateSessionId(ipAddress);
+
+                // Call FastAPI service with the session ID
+                var response = await CallFastApi(request.Message, sessionId);
 
                 // Increment rate limit counter
                 await IncrementRateLimit(ipAddress);
@@ -73,12 +76,12 @@ namespace Portfolio_server.Controllers
         }
 
         // Helper method to call FastAPI
-        private async Task<ChatResponse> CallFastApi(string message)
+        private async Task<ChatResponse> CallFastApi(string message, string sessionId)
         {
             var client = _httpClientFactory.CreateClient("FastAPI");
 
             var content = new StringContent(
-                JsonSerializer.Serialize(new { message }),
+                JsonSerializer.Serialize(new { message, session_id = sessionId }),
                 Encoding.UTF8,
                 "application/json");
 
@@ -94,6 +97,24 @@ namespace Portfolio_server.Controllers
             {
                 PropertyNameCaseInsensitive = true
             });
+        }
+
+        // Get or create a persistent session ID for the user
+        private async Task<string> GetOrCreateSessionId(string ipAddress)
+        {
+            var db = _redis.GetDatabase();
+            var key = $"session:{ipAddress}";
+
+            var sessionId = await db.StringGetAsync(key);
+
+            if (!sessionId.HasValue)
+            {
+                // Create a new session ID if none exists
+                sessionId = Guid.NewGuid().ToString();
+                await db.StringSetAsync(key, sessionId, TimeSpan.FromDays(30)); // 30 day session lifetime
+            }
+
+            return sessionId;
         }
 
         // Rate limiting methods using Redis
