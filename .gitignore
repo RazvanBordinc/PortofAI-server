@@ -1,0 +1,104 @@
+## Ignore Visual Studio temporary files, build results, and
+## user-specific files
+.vs/
+# Build Folders (bin, obj, etc)
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# Rider
+.idea/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Mono Auto Generated Files
+mono_crash.*
+
+# Windows image file caches
+Thumbs.db
+ehthumbs.db
+
+# Folder config file
+Desktop.ini
+
+# Recycle Bin used on file shares
+$RECYCLE.BIN/
+
+# VS Code settings
+.vscode/
+
+# DotCover
+*.dotCover
+
+# ASP.NET Scaffolding
+ScaffoldingReadMe.txt
+
+# NuGet
+*.nupkg
+*.snupkg
+**/packages/*
+!**/packages/build/
+!**/packages/repositories.config
+*.nuspec
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Dotnet CLI
+project.assets.json
+project.nuget.cache
+*.csproj.user
+*.vbproj.user
+
+# Entity Framework
+*.Designer.cs
+*.edmx*
+*.tt
+*.sql
+
+# MSTest test Results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# NCrunch
+*.ncrunch*
+.*crunch*.local.xml
+
+# SonarQube
+.sonar/
+
+# Coverage results
+*.coverage
+*.coveragexml
+TestResults/
+
+# Local History for Visual Studio
+.localhistory/
+
+# Windows
+*.dbmdl
+
+# Other
+*.swp
+*.bak
+*.orig
+*.tmp
+
+# Resharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# StyleCop
+StyleCopReport.xml
+
+# TeamCity
+_TeamCity*
+
+# DotNet specific
+global.json
