@@ -6,30 +6,35 @@ using System;
 
 var builder = WebApplication.CreateBuilder(args);
 
- 
+// Add services to the container
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
- 
+// Add HTTP client
 builder.Services.AddHttpClient();
 
-// Configure Redis with error handling
-var redisConnectionString = builder.Configuration.GetConnectionString("Redis") ?? "localhost:6379";
+// Redis connection configuration - Update this section in Program.cs
 try
 {
     var options = new ConfigurationOptions
     {
         AbortOnConnectFail = false, // Don't abort if connection fails initially
-        ConnectTimeout = 5000, // Timeout after 5 seconds
-        ConnectRetry = 3 // Retry 3 times
+        ConnectTimeout = 10000, // Increase timeout to 10 seconds
+        ConnectRetry = 5, // Increase retry attempts
+        SyncTimeout = 10000, // Increase sync timeout
+        Password = builder.Configuration.GetConnectionString("RedisPassword") ?? "VeryPasswordStrongIs2",
+        AllowAdmin = true // Enable admin commands if needed
     };
 
     // Parse the connection string
-    foreach (var endpoint in redisConnectionString.Split(','))
+    var redisHost = builder.Configuration.GetConnectionString("Redis") ?? "redis:6379";
+    foreach (var endpoint in redisHost.Split(','))
     {
         options.EndPoints.Add(endpoint.Trim());
     }
+
+    Console.WriteLine($"Attempting to connect to Redis at {redisHost}");
 
     var redis = ConnectionMultiplexer.Connect(options);
     builder.Services.AddSingleton<IConnectionMultiplexer>(redis);
@@ -38,8 +43,8 @@ try
 catch (Exception ex)
 {
     Console.WriteLine($"WARNING: Failed to connect to Redis. Some functionality will be limited: {ex.Message}");
-    // Provide a dummy/mock implementation if needed
-    // This is optional - you can decide if you want the app to run without Redis
+    // Provide a dummy implementation for IConnectionMultiplexer
+    builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect("localhost"));
 }
 
 // Configure HTTP client for FastAPI
@@ -68,7 +73,7 @@ builder.Services.AddCors(options =>
 var app = builder.Build();
 
 // Configure the HTTP request pipeline
-if (app.Environment.IsDevelopment())
+if (app.Environment.IsDevelopment() || app.Environment.IsProduction())
 {
     app.UseSwagger();
     app.UseSwaggerUI();

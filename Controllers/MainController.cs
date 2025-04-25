@@ -18,6 +18,7 @@ namespace Portfolio_server.Controllers
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IConnectionMultiplexer _redis;
         private readonly ILogger<MainController> _logger;
+        private readonly PortfolioController _portfolioController;
         private readonly bool _redisAvailable = true;
 
         // Constructor with dependency injection
@@ -29,6 +30,11 @@ namespace Portfolio_server.Controllers
             _httpClientFactory = httpClientFactory;
             _redis = redis;
             _logger = logger;
+            // Create a new logger for the portfolio controller directly
+            _portfolioController = new PortfolioController(
+                LoggerFactory.Create(builder => builder.AddConsole())
+                    .CreateLogger<PortfolioController>()
+            );
 
             // Test if Redis is actually working
             try
@@ -56,7 +62,6 @@ namespace Portfolio_server.Controllers
             return Ok(new { status = "pong", timestamp = DateTime.UtcNow });
         }
 
-        // Chat endpoint
         [HttpPost("chat")]
         public async Task<IActionResult> Chat([FromBody] ChatRequest request)
         {
@@ -98,8 +103,36 @@ namespace Portfolio_server.Controllers
                     sessionId = $"fallback-{ipAddress}";
                 }
 
-                // Call FastAPI service with the session ID
-                var response = await CallFastApi(request.Message, sessionId);
+                // Enrich the message with portfolio context
+                string enrichedMessage = request.Message;
+                try
+                {
+                    _logger.LogInformation("Enriching chat context with portfolio data");
+                    var enrichResult = _portfolioController.EnrichChatContext(request.Message) as ObjectResult;
+
+                    if (enrichResult?.Value is object value)
+                    {
+                        var contextProperty = value.GetType().GetProperty("context");
+                        if (contextProperty != null)
+                        {
+                            string portfolioContext = contextProperty.GetValue(value)?.ToString() ?? "";
+
+                            if (!string.IsNullOrEmpty(portfolioContext))
+                            {
+                                // Combine the context with the original message when sending to the AI
+                                enrichedMessage = $"{portfolioContext}\n\nUser message: {request.Message}";
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning($"Failed to enrich message with portfolio data: {ex.Message}. Using original message.");
+                    // Continue with original message if enrichment fails
+                }
+
+                // Call FastAPI service with the session ID and enriched message
+                var response = await CallFastApi(enrichedMessage, sessionId, request.Style ?? "NORMAL");
 
                 // Process the response to extract format information
                 var processedResponse = ProcessAiResponse(response.Response);
@@ -137,22 +170,24 @@ namespace Portfolio_server.Controllers
             }
         }
 
+
+
         // Helper method to call FastAPI
-        private async Task<ChatResponse> CallFastApi(string message, string sessionId)
+        private async Task<ChatResponse> CallFastApi(string message, string sessionId, string style)
         {
             try
             {
                 var client = _httpClientFactory.CreateClient("FastAPI");
 
                 var content = new StringContent(
-                    JsonSerializer.Serialize(new { message, session_id = sessionId }),
+                    JsonSerializer.Serialize(new { message, session_id = sessionId, style }),
                     Encoding.UTF8,
                     "application/json");
 
-                _logger.LogInformation($"Sending request to FastAPI for session {sessionId}");
+                _logger.LogInformation($"Sending request to FastAPI for session {sessionId} with style {style}");
 
                 // Add a timeout to the request
-                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(10));
+                using var cts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(15)); // Increased timeout
                 var response = await client.PostAsync("/chat", content, cts.Token);
 
                 if (!response.IsSuccessStatusCode)
@@ -195,7 +230,10 @@ namespace Portfolio_server.Controllers
             }
         }
 
+
         // Process AI response to extract format instructions
+
+        // Enhanced JSON validation and debugging in ProcessAiResponse method
         private ProcessedResponse ProcessAiResponse(string aiResponse)
         {
             var processedResponse = new ProcessedResponse
@@ -225,28 +263,49 @@ namespace Portfolio_server.Controllers
 
                     // Remove the format tag from the response
                     processedResponse.Text = formatRegex.Replace(aiResponse, "").Trim();
+                }
 
-                    // Look for JSON data after the format
-                    // This would handle cases where the AI wants to include structured data
-                    var jsonDataRegex = new Regex(@"\[data:(.*?)\]", RegexOptions.Singleline);
-                    var dataMatch = jsonDataRegex.Match(aiResponse);
+                // Remove [/format] tag if present
+                processedResponse.Text = processedResponse.Text.Replace("[/format]", "").Trim();
 
-                    if (dataMatch.Success)
+                // Look for JSON data after the format
+                var jsonDataRegex = new Regex(@"\[data:([\s\S]*?)\]", RegexOptions.Singleline);
+                var dataMatch = jsonDataRegex.Match(processedResponse.Text);
+
+                if (dataMatch.Success)
+                {
+                    try
                     {
-                        try
-                        {
-                            // Try to parse the data as JSON
-                            var jsonData = dataMatch.Groups[1].Value.Trim();
-                            processedResponse.FormatData = JsonSerializer.Deserialize<object>(jsonData);
+                        string jsonData = dataMatch.Groups[1].Value.Trim();
+                        _logger.LogDebug($"Found JSON data: {jsonData.Substring(0, Math.Min(100, jsonData.Length))}...");
 
-                            // Remove the data tag from the response
-                            processedResponse.Text = jsonDataRegex.Replace(processedResponse.Text, "").Trim();
-                        }
-                        catch (JsonException ex)
+                        // Try to pre-process the JSON to fix common issues
+                        jsonData = PreProcessJsonData(jsonData);
+
+                        // Parse JSON data
+                        processedResponse.FormatData = JsonSerializer.Deserialize<object>(jsonData, new JsonSerializerOptions
                         {
-                            _logger.LogWarning(ex, "Failed to parse JSON data from AI response");
-                        }
+                            PropertyNameCaseInsensitive = true,
+                            AllowTrailingCommas = true,
+                            ReadCommentHandling = JsonCommentHandling.Skip
+                        });
+
+                        // Remove the data tag from the response text
+                        processedResponse.Text = jsonDataRegex.Replace(processedResponse.Text, "").Trim();
+
+                        _logger.LogInformation($"Parsed JSON data successfully for format: {processedResponse.Format}");
                     }
+                    catch (JsonException ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to parse JSON data from AI response");
+
+                        // Keep the data in the text if we couldn't parse it
+                        _logger.LogWarning($"JSON parse error: {ex.Message}, Data: {dataMatch.Groups[1].Value.Substring(0, Math.Min(100, dataMatch.Groups[1].Value.Length))}");
+                    }
+                }
+                else
+                {
+                    _logger.LogInformation($"No JSON data found in response with format: {processedResponse.Format}");
                 }
 
                 return processedResponse;
@@ -258,6 +317,38 @@ namespace Portfolio_server.Controllers
             }
         }
 
+        // Helper method to pre-process JSON data to fix common issues
+        private string PreProcessJsonData(string jsonData)
+        {
+            if (string.IsNullOrEmpty(jsonData))
+                return jsonData;
+
+            try
+            {
+                // Replace single quotes with double quotes (after escaping existing double quotes)
+                string processed = jsonData
+                    .Replace("\\\"", "\\TEMP_QUOTE") // Temporarily replace escaped double quotes
+                    .Replace("\"", "\\\"") // Escape all double quotes
+                    .Replace("'", "\"") // Replace single quotes with double quotes
+                    .Replace("\\TEMP_QUOTE", "\\\""); // Restore originally escaped double quotes
+
+                // Fix common malformed JSON issues
+                processed = Regex.Replace(processed, @",(\s*[\]}])", "$1"); // Remove trailing commas before closing brackets
+
+                // Add quotation marks to property names that are missing them
+                processed = Regex.Replace(processed, @"([\{,])\s*([a-zA-Z0-9_]+)\s*:", "$1\"$2\":");
+
+                _logger.LogDebug($"Pre-processed JSON: {processed.Substring(0, Math.Min(100, processed.Length))}...");
+
+                return processed;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error pre-processing JSON data");
+                return jsonData; // Return original on error
+            }
+        }
+
         // Get or create a persistent session ID for the user
         private async Task<string> GetOrCreateSessionId(string ipAddress)
         {
@@ -265,6 +356,7 @@ namespace Portfolio_server.Controllers
             {
                 if (!_redisAvailable)
                 {
+                    _logger.LogWarning("Redis not available, using fallback session ID based on IP");
                     return $"fallback-{ipAddress}";
                 }
 
@@ -277,8 +369,25 @@ namespace Portfolio_server.Controllers
                 {
                     // Create a new session ID if none exists
                     sessionId = Guid.NewGuid().ToString();
-                    await db.StringSetAsync(key, sessionId, TimeSpan.FromDays(30)); // 30 day session lifetime
-                    _logger.LogInformation($"Created new session {sessionId} for IP {ipAddress}");
+
+                    // Store with 30-day expiration
+                    var setResult = await db.StringSetAsync(key, sessionId, TimeSpan.FromDays(30));
+
+                    if (setResult)
+                    {
+                        _logger.LogInformation($"Created new session {sessionId} for IP {ipAddress} with 30-day expiration");
+                    }
+                    else
+                    {
+                        _logger.LogWarning($"Failed to set new session in Redis for IP {ipAddress}");
+                        return $"fallback-{ipAddress}";
+                    }
+                }
+                else
+                {
+                    // Refresh expiration time on existing session
+                    await db.KeyExpireAsync(key, TimeSpan.FromDays(30));
+                    _logger.LogInformation($"Using existing session {sessionId} for IP {ipAddress}, refreshed expiration");
                 }
 
                 return sessionId;
@@ -287,6 +396,83 @@ namespace Portfolio_server.Controllers
             {
                 _logger.LogWarning($"Redis error in GetOrCreateSessionId: {ex.Message}");
                 return $"fallback-{ipAddress}";
+            }
+        }
+        [HttpPost("clear-session")]
+        public async Task<IActionResult> ClearSession()
+        {
+            try
+            {
+                if (!_redisAvailable)
+                {
+                    return BadRequest(new { message = "Redis is not available, cannot clear session" });
+                }
+
+                string ipAddress = GetClientIpAddress();
+                var db = _redis.GetDatabase();
+
+                // Clear session ID
+                var sessionKey = $"session:{ipAddress}";
+                bool sessionDeleted = await db.KeyDeleteAsync(sessionKey);
+
+                // Clear conversation history
+                string sessionId = await GetOrCreateSessionId(ipAddress);
+                var conversationKey = $"conversation:{sessionId}";
+                bool conversationDeleted = await db.KeyDeleteAsync(conversationKey);
+
+                _logger.LogInformation($"Cleared session for IP {ipAddress}: Session key deleted: {sessionDeleted}, Conversation deleted: {conversationDeleted}");
+
+                return Ok(new { message = "Session cleared successfully" });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error clearing session");
+                return StatusCode(500, new { message = "An error occurred while clearing your session" });
+            }
+        }
+
+ 
+        [HttpGet("session-info")]
+        public async Task<IActionResult> GetSessionInfo()
+        {
+            try
+            {
+                if (!_redisAvailable)
+                {
+                    return BadRequest(new { message = "Redis is not available, cannot retrieve session info" });
+                }
+
+                string ipAddress = GetClientIpAddress();
+                string sessionId = await GetOrCreateSessionId(ipAddress);
+
+                var db = _redis.GetDatabase();
+                var sessionKey = $"session:{ipAddress}";
+                var conversationKey = $"conversation:{sessionId}";
+
+                // Get TTL for session
+                var sessionTtl = await db.KeyTimeToLiveAsync(sessionKey);
+                var sessionTtlDays = sessionTtl.HasValue ? Math.Round(sessionTtl.Value.TotalDays, 1) : 0;
+
+                // Get TTL for conversation
+                var conversationTtl = await db.KeyTimeToLiveAsync(conversationKey);
+                var conversationTtlHours = conversationTtl.HasValue ? Math.Round(conversationTtl.Value.TotalHours, 1) : 0;
+
+                // Check if conversation exists
+                bool conversationExists = await db.KeyExistsAsync(conversationKey);
+
+                return Ok(new
+                {
+                    ipAddress,
+                    sessionId,
+                    sessionTtlDays,
+                    conversationExists,
+                    conversationTtlHours
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting session info");
+                return StatusCode(500, new { message = "An error occurred while retrieving session information" });
             }
         }
 
@@ -301,7 +487,16 @@ namespace Portfolio_server.Controllers
                 }
 
                 var db = _redis.GetDatabase();
-                var value = await db.StringGetAsync($"ratelimit:{ipAddress}");
+                var key = $"ratelimit:{ipAddress}";
+
+                // Check if the key exists
+                if (!await db.KeyExistsAsync(key))
+                {
+                    _logger.LogInformation($"No rate limit found for IP {ipAddress}, initializing new counter");
+                    return true; // No rate limit set yet
+                }
+
+                var value = await db.StringGetAsync(key);
 
                 if (!value.HasValue)
                 {
@@ -315,7 +510,9 @@ namespace Portfolio_server.Controllers
                     return true; // Assume no rate limit on error
                 }
 
-                return count < 15; // Allow 15 requests per day
+                bool result = count < 15; // Allow 15 requests per day
+                _logger.LogInformation($"Rate limit check for IP {ipAddress}: {count}/15 requests used, allowed = {result}");
+                return result;
             }
             catch (Exception ex)
             {
@@ -338,13 +535,15 @@ namespace Portfolio_server.Controllers
 
                 if (await db.KeyExistsAsync(key))
                 {
-                    await db.StringIncrementAsync(key);
+                    var newValue = await db.StringIncrementAsync(key);
+                    _logger.LogInformation($"Incremented rate limit for IP {ipAddress} to {newValue}");
                 }
                 else
                 {
                     await db.StringSetAsync(key, 1);
                     // Set TTL for 24 hours (86400 seconds)
                     await db.KeyExpireAsync(key, TimeSpan.FromSeconds(86400));
+                    _logger.LogInformation($"Created new rate limit for IP {ipAddress}");
                 }
             }
             catch (Exception ex)
@@ -354,7 +553,6 @@ namespace Portfolio_server.Controllers
             }
         }
 
-        // Get remaining requests for an IP
         [HttpGet("remaining")]
         public async Task<IActionResult> RemainingRequests()
         {
@@ -370,18 +568,37 @@ namespace Portfolio_server.Controllers
                 if (_redisAvailable)
                 {
                     var db = _redis.GetDatabase();
-                    var value = await db.StringGetAsync($"ratelimit:{ipAddress}");
+                    var key = $"ratelimit:{ipAddress}";
 
-                    if (value.HasValue)
+                    if (await db.KeyExistsAsync(key))
                     {
-                        if (!int.TryParse(value, out used))
+                        var value = await db.StringGetAsync(key);
+
+                        if (value.HasValue)
                         {
-                            _logger.LogWarning($"Invalid rate limit value in Redis: {value}");
+                            if (!int.TryParse(value, out used))
+                            {
+                                _logger.LogWarning($"Invalid rate limit value in Redis: {value}");
+                                used = 0;
+                            }
+                        }
+
+                        // Also check TTL to ensure the key hasn't expired
+                        var ttl = await db.KeyTimeToLiveAsync(key);
+                        if (!ttl.HasValue)
+                        {
+                            _logger.LogWarning($"Rate limit key for IP {ipAddress} has no TTL, resetting");
                             used = 0;
+                            await db.KeyDeleteAsync(key);
                         }
                     }
+                    else
+                    {
+                        _logger.LogInformation($"No rate limit key found for IP {ipAddress}");
+                        used = 0;
+                    }
 
-                    remaining = 15 - used;
+                    remaining = Math.Max(0, 15 - used);
                 }
 
                 _logger.LogInformation($"Remaining requests for IP {ipAddress}: {remaining}");
@@ -413,20 +630,20 @@ namespace Portfolio_server.Controllers
     // Request model
     public class ChatRequest
     {
-        public string Message { get; set; }
+        public string Message { get; set; } = string.Empty;
+        public string? Style { get; set; }
     }
-
     // Response model from AI service
     public class ChatResponse
     {
-        public string Response { get; set; }
+        public string Response { get; set; } = string.Empty;
     }
 
     // Processed response with format information
     public class ProcessedResponse
     {
-        public string Text { get; set; }
-        public string Format { get; set; }
-        public object FormatData { get; set; }
+        public string Text { get; set; } = string.Empty;
+        public string Format { get; set; } = string.Empty;
+        public object? FormatData { get; set; } = null;
     }
 }
