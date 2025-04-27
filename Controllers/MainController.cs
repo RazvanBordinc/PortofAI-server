@@ -131,45 +131,71 @@ namespace Portfolio_server.Controllers
                     // Continue with original message if enrichment fails
                 }
 
-                // Call FastAPI service with the session ID and enriched message
-                var response = await CallFastApi(enrichedMessage, sessionId, request.Style ?? "NORMAL");
-
-                // Process the response to extract format information
-                var processedResponse = ProcessAiResponse(response.Response);
-
-                // Increment rate limit counter (if Redis is available)
-                if (_redisAvailable)
+                try
                 {
-                    try
+                    // Call FastAPI service with the session ID and enriched message
+                    var response = await CallFastApi(enrichedMessage, sessionId, request.Style ?? "NORMAL");
+
+                    // Process the response to extract format information
+                    var processedResponse = ProcessAiResponse(response.Response);
+
+                    // Increment rate limit counter (if Redis is available)
+                    if (_redisAvailable)
                     {
-                        await IncrementRateLimit(ipAddress);
+                        try
+                        {
+                            await IncrementRateLimit(ipAddress);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning($"Failed to increment rate limit: {ex.Message}");
+                            // Continue anyway - we don't want to block the response
+                        }
                     }
-                    catch (Exception ex)
+
+                    return Ok(new
                     {
-                        _logger.LogWarning($"Failed to increment rate limit: {ex.Message}");
-                        // Continue anyway - we don't want to block the response
-                    }
+                        response = processedResponse.Text,
+                        format = processedResponse.Format,
+                        formatData = processedResponse.FormatData
+                    });
                 }
-
-                return Ok(new
+                catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.InternalServerError)
                 {
-                    response = processedResponse.Text,
-                    format = processedResponse.Format,
-                    formatData = processedResponse.FormatData
-                });
-            }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogError($"HTTP request error calling FastAPI: {ex.Message}");
-                return StatusCode(502, new { message = "Unable to reach AI service. Please try again later." });
+                    _logger.LogError($"500 Internal Server Error from FastAPI: {ex.Message}");
+
+                    // Create a fallback response
+                    return Ok(new
+                    {
+                        response = $"I'm sorry, I couldn't process your request due to a technical issue. Your message was: '{request.Message}'. Please try again later.",
+                        format = "text",
+                        formatData = new { } // Empty object, not null
+                    });
+                }
+                catch (HttpRequestException ex)
+                {
+                    _logger.LogError($"HTTP request error calling FastAPI: {ex.Message}");
+
+                    return StatusCode(502, new
+                    {
+                        response = "Unable to reach AI service. Please try again later.",
+                        format = "text",
+                        formatData = new { }
+                    });
+                }
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error processing chat request");
-                return StatusCode(500, new { message = "An error occurred while processing your request" });
+
+                return StatusCode(500, new
+                {
+                    response = "An error occurred while processing your request. Please try again later.",
+                    format = "text",
+                    formatData = new { }
+                });
             }
         }
-
 
 
         // Helper method to call FastAPI
@@ -231,9 +257,6 @@ namespace Portfolio_server.Controllers
         }
 
 
-        // Process AI response to extract format instructions
-
-        // Enhanced JSON validation and debugging in ProcessAiResponse method
         private ProcessedResponse ProcessAiResponse(string aiResponse)
         {
             var processedResponse = new ProcessedResponse
@@ -252,7 +275,35 @@ namespace Portfolio_server.Controllers
 
             try
             {
-                // Look for format tag: [format:type]
+                // Step 1: Check if the response already contains proper format and data fields from the Python service
+                if (aiResponse.Contains("format") && aiResponse.Contains("formatData"))
+                {
+                    try
+                    {
+                        // This may be a JSON response with format and formatData already properly structured
+                        var jsonOptions = new JsonSerializerOptions
+                        {
+                            PropertyNameCaseInsensitive = true,
+                            AllowTrailingCommas = true,
+                            ReadCommentHandling = JsonCommentHandling.Skip
+                        };
+
+                        var directResponse = JsonSerializer.Deserialize<ProcessedResponse>(aiResponse, jsonOptions);
+
+                        if (directResponse != null && !string.IsNullOrEmpty(directResponse.Format))
+                        {
+                            _logger.LogInformation("Response already contains properly structured format and data");
+                            return directResponse;
+                        }
+                    }
+                    catch (JsonException ex)
+                    {
+                        _logger.LogWarning($"Response looks like it contains format fields but isn't valid JSON: {ex.Message}");
+                        // Continue with regular parsing
+                    }
+                }
+
+                // Step 2: Look for format tag: [format:type]
                 var formatRegex = new Regex(@"\[format:(text|table|contact|pdf)\]", RegexOptions.IgnoreCase);
                 var match = formatRegex.Match(aiResponse);
 
@@ -265,10 +316,10 @@ namespace Portfolio_server.Controllers
                     processedResponse.Text = formatRegex.Replace(aiResponse, "").Trim();
                 }
 
-                // Remove [/format] tag if present
+                // Step 3: Remove [/format] tag if present
                 processedResponse.Text = processedResponse.Text.Replace("[/format]", "").Trim();
 
-                // Look for JSON data after the format
+                // Step 4: Look for JSON data in the response
                 var jsonDataRegex = new Regex(@"\[data:([\s\S]*?)\]", RegexOptions.Singleline);
                 var dataMatch = jsonDataRegex.Match(processedResponse.Text);
 
@@ -279,33 +330,70 @@ namespace Portfolio_server.Controllers
                         string jsonData = dataMatch.Groups[1].Value.Trim();
                         _logger.LogDebug($"Found JSON data: {jsonData.Substring(0, Math.Min(100, jsonData.Length))}...");
 
-                        // Try to pre-process the JSON to fix common issues
-                        jsonData = PreProcessJsonData(jsonData);
+                        // Step 5: Aggressively try to fix the JSON data
+                        jsonData = FixJsonData(jsonData, processedResponse.Format);
 
-                        // Parse JSON data
-                        processedResponse.FormatData = JsonSerializer.Deserialize<object>(jsonData, new JsonSerializerOptions
+                        // Step 6: Try to parse the fixed JSON
+                        try
                         {
-                            PropertyNameCaseInsensitive = true,
-                            AllowTrailingCommas = true,
-                            ReadCommentHandling = JsonCommentHandling.Skip
-                        });
+                            var options = new JsonSerializerOptions
+                            {
+                                PropertyNameCaseInsensitive = true,
+                                AllowTrailingCommas = true,
+                                ReadCommentHandling = JsonCommentHandling.Skip
+                            };
 
-                        // Remove the data tag from the response text
+                            // Parse the JSON data
+                            processedResponse.FormatData = JsonSerializer.Deserialize<object>(jsonData, options);
+
+                            // Remove the data tag from the response text
+                            processedResponse.Text = jsonDataRegex.Replace(processedResponse.Text, "").Trim();
+
+                            _logger.LogInformation($"Successfully parsed JSON data for format: {processedResponse.Format}");
+                        }
+                        catch (JsonException ex)
+                        {
+                            _logger.LogWarning(ex, "Failed to parse JSON data after fixes");
+
+                            // Create a fallback FormatData
+                            processedResponse.FormatData = CreateFallbackData(processedResponse.Format);
+
+                            // Remove the problematic data tag
+                            processedResponse.Text = jsonDataRegex.Replace(processedResponse.Text, "").Trim();
+
+                            // Add a note if one doesn't already exist
+                            if (!processedResponse.Text.Contains("using default") && !processedResponse.Text.Contains("default template"))
+                            {
+                                processedResponse.Text += "\n\nNote: There was an issue with the data format. Using default data.";
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Error parsing JSON data");
+                        processedResponse.FormatData = CreateFallbackData(processedResponse.Format);
+
+                        // Keep the original text but remove the problematic JSON
                         processedResponse.Text = jsonDataRegex.Replace(processedResponse.Text, "").Trim();
 
-                        _logger.LogInformation($"Parsed JSON data successfully for format: {processedResponse.Format}");
-                    }
-                    catch (JsonException ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to parse JSON data from AI response");
-
-                        // Keep the data in the text if we couldn't parse it
-                        _logger.LogWarning($"JSON parse error: {ex.Message}, Data: {dataMatch.Groups[1].Value.Substring(0, Math.Min(100, dataMatch.Groups[1].Value.Length))}");
+                        // Add a note if one doesn't already exist
+                        if (!processedResponse.Text.Contains("using default") && !processedResponse.Text.Contains("default template"))
+                        {
+                            processedResponse.Text += "\n\nNote: There was an issue with the data format. Using default data.";
+                        }
                     }
                 }
-                else
+                else if (processedResponse.Format != "text")
                 {
-                    _logger.LogInformation($"No JSON data found in response with format: {processedResponse.Format}");
+                    // If a special format is requested but no data is provided, create fallback data
+                    _logger.LogWarning($"No JSON data found for format type: {processedResponse.Format}");
+                    processedResponse.FormatData = CreateFallbackData(processedResponse.Format);
+
+                    // Add a note if one doesn't already exist
+                    if (!processedResponse.Text.Contains("using default") && !processedResponse.Text.Contains("default template"))
+                    {
+                        processedResponse.Text += "\n\nNote: No structured data was provided. Using default template.";
+                    }
                 }
 
                 return processedResponse;
@@ -317,6 +405,121 @@ namespace Portfolio_server.Controllers
             }
         }
 
+        // Advanced JSON fixing method
+        private string FixJsonData(string jsonData, string formatType)
+        {
+            if (string.IsNullOrEmpty(jsonData))
+                return CreateFallbackDataJson(formatType);
+
+            try
+            {
+                // Initial cleanup of whitespace
+                string cleaned = jsonData.Trim();
+
+                // Check if it's already wrapped in curly braces
+                if (!cleaned.StartsWith("{"))
+                {
+                    // It might be a fragment, try to wrap it
+                    if (cleaned.Contains(":") && (cleaned.Contains("rows") || cleaned.Contains("columns") ||
+                        cleaned.Contains("recipientName") || cleaned.Contains("content")))
+                    {
+                        cleaned = "{" + cleaned + "}";
+                    }
+                }
+
+                // Replace single quotes with double quotes
+                cleaned = cleaned.Replace("'", "\"");
+
+                // Add quotes around property names
+                cleaned = Regex.Replace(cleaned, @"([{,])\s*([a-zA-Z0-9_]+)\s*:", "$1\"$2\":");
+
+                // Remove trailing commas
+                cleaned = Regex.Replace(cleaned, @",\s*([}\]])", "$1");
+
+                // Fix missing commas between properties
+                cleaned = Regex.Replace(cleaned, @"([}\]])([^,\]}])", "$1,$2");
+                cleaned = Regex.Replace(cleaned, @"(\"")([^,:{}\[\] ""\]+)(\"")\s*(\{)", "$1$2$3,$4");
+
+
+
+                // Fix common AI error where JSON is malformed with string fragments
+                if (formatType == "table" && cleaned.Contains("\"rows\"") && !cleaned.Contains("\"columns\""))
+                    {
+                        // Add columns array if missing
+                        int rowsIndex = cleaned.IndexOf("\"rows\"");
+                        if (rowsIndex > 0)
+                        {
+                            string columnsArray = "\"columns\":[{\"id\":\"col1\",\"label\":\"Column 1\"},{\"id\":\"col2\",\"label\":\"Column 2\"}],";
+                            cleaned = cleaned.Insert(rowsIndex, columnsArray);
+                        }
+                    }
+
+                    // Try to parse the cleaned JSON to validate it
+                    try
+                    {
+                        var options = new JsonSerializerOptions
+                        {
+                            AllowTrailingCommas = true,
+                            ReadCommentHandling = JsonCommentHandling.Skip
+                        };
+
+                        var testParse = JsonSerializer.Deserialize<object>(cleaned, options);
+                        _logger.LogInformation("JSON validation successful after cleaning");
+                        return cleaned;
+                    }
+                    catch (JsonException ex)
+                    {
+                        _logger.LogWarning($"JSON still invalid after cleaning: {ex.Message}");
+
+                        // Last resort: extract fragments and rebuild JSON
+                        if (formatType == "table")
+                        {
+                            // Try to extract rows and columns
+                            var rowsMatch = Regex.Match(cleaned, @"""rows""[\s\n]*?:[\s\n]*?(\[[\s\S]*?\])");
+                            var columnsMatch = Regex.Match(cleaned, @"""columns""[\s\n]*?:[\s\n]*?(\[[\s\S]*?\])");
+                            var titleMatch = Regex.Match(cleaned, @"""title""[\s\n]*?:[\s\n]*?""([^""]*)""");
+
+                            if (rowsMatch.Success)
+                            {
+                                string rows = rowsMatch.Groups[1].Value;
+                                string columns = columnsMatch.Success ? columnsMatch.Groups[1].Value : "[{\"id\":\"col1\",\"label\":\"Column 1\"},{\"id\":\"col2\",\"label\":\"Column 2\"}]";
+                                string title = titleMatch.Success ? titleMatch.Groups[1].Value : "Data Table";
+
+                                return $"{{\"title\":\"{title}\",\"columns\":{columns},\"rows\":{rows}}}";
+                            }
+                        }
+
+                        // If we still can't fix it, return fallback data
+                        return CreateFallbackDataJson(formatType);
+                    }
+                }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error cleaning JSON data");
+                return CreateFallbackDataJson(formatType);
+            }
+        }
+        private string CreateFallbackDataJson(string formatType)
+        {
+            string fallbackJson = "{}";
+
+            switch (formatType.ToLower())
+            {
+                case "table":
+                    fallbackJson = "{\"title\":\"Data Table\",\"columns\":[{\"id\":\"col1\",\"label\":\"Column 1\"},{\"id\":\"col2\",\"label\":\"Column 2\"}],\"rows\":[{\"col1\":\"No data available\",\"col2\":\"Please try again\"}]}";
+                    break;
+
+                case "contact":
+                    fallbackJson = "{\"title\":\"Contact Form\",\"recipientName\":\"Portfolio Owner\",\"recipientPosition\":\"Full Stack Developer\",\"emailSubject\":\"Contact from Portfolio Website\",\"socialLinks\":[{\"platform\":\"LinkedIn\",\"url\":\"#\",\"icon\":\"linkedin\"}]}";
+                    break;
+
+                case "pdf":
+                    fallbackJson = "{\"title\":\"Document.pdf\",\"totalPages\":1,\"lastUpdated\":\"April 2025\",\"content\":[{\"pageNumber\":1,\"heading\":\"Document Content\",\"summary\":\"Document content could not be loaded.\"}]}";
+                    break;
+            }
+
+            return fallbackJson;
+        }
         // Helper method to pre-process JSON data to fix common issues
         private string PreProcessJsonData(string jsonData)
         {
@@ -325,17 +528,17 @@ namespace Portfolio_server.Controllers
 
             try
             {
-                // Replace single quotes with double quotes (after escaping existing double quotes)
+                // Step 1: Replace single quotes with double quotes (after escaping existing double quotes)
                 string processed = jsonData
                     .Replace("\\\"", "\\TEMP_QUOTE") // Temporarily replace escaped double quotes
                     .Replace("\"", "\\\"") // Escape all double quotes
                     .Replace("'", "\"") // Replace single quotes with double quotes
                     .Replace("\\TEMP_QUOTE", "\\\""); // Restore originally escaped double quotes
 
-                // Fix common malformed JSON issues
+                // Step 2: Fix common malformed JSON issues
                 processed = Regex.Replace(processed, @",(\s*[\]}])", "$1"); // Remove trailing commas before closing brackets
 
-                // Add quotation marks to property names that are missing them
+                // Step 3: Add quotation marks to property names that are missing them
                 processed = Regex.Replace(processed, @"([\{,])\s*([a-zA-Z0-9_]+)\s*:", "$1\"$2\":");
 
                 _logger.LogDebug($"Pre-processed JSON: {processed.Substring(0, Math.Min(100, processed.Length))}...");
@@ -348,7 +551,149 @@ namespace Portfolio_server.Controllers
                 return jsonData; // Return original on error
             }
         }
+        // Helper method to create fallback data for each format type
+        private object CreateFallbackData(string formatType)
+        {
+            switch (formatType.ToLower())
+            {
+                case "table":
+                    return new
+                    {
+                        title = "Data Table",
+                        columns = new[]
+                        {
+                    new { id = "col1", label = "Column 1" },
+                    new { id = "col2", label = "Column 2" }
+                },
+                        rows = new[]
+                        {
+                    new { col1 = "No data available", col2 = "Please try again" }
+                }
+                    };
 
+                case "contact":
+                    return new
+                    {
+                        title = "Contact Form",
+                        recipientName = "Portfolio Owner",
+                        recipientPosition = "Full Stack Developer",
+                        emailSubject = "Contact from Portfolio Website",
+                        socialLinks = new[]
+                        {
+                    new { platform = "LinkedIn", url = "#", icon = "linkedin" }
+                }
+                    };
+
+                case "pdf":
+                    return new
+                    {
+                        title = "Document.pdf",
+                        totalPages = 1,
+                        lastUpdated = DateTime.Now.ToString("MMMM yyyy"),
+                        content = new[]
+                        {
+                    new
+                    {
+                        pageNumber = 1,
+                        heading = "Document Content",
+                        summary = "Document content could not be loaded."
+                    }
+                }
+                    };
+
+                default:
+                    return null;
+            }
+        }
+        // Helper method to validate and transform JSON based on format type
+        private string ValidateJsonByFormatType(string jsonData, string formatType)
+        {
+            try
+            {
+                // First parse the JSON to work with it as an object
+                using JsonDocument document = JsonDocument.Parse(jsonData, new JsonDocumentOptions { AllowTrailingCommas = true });
+                JsonElement root = document.RootElement;
+
+                // Create a new object to hold the validated JSON
+                var outputObject = new Dictionary<string, object>();
+
+                // Copy all existing properties
+                foreach (JsonProperty property in root.EnumerateObject())
+                {
+                    outputObject[property.Name] = JsonSerializer.Deserialize<object>(property.Value.GetRawText());
+                }
+
+                // Add required properties based on format type
+                switch (formatType.ToLower())
+                {
+                    case "table":
+                        if (!outputObject.ContainsKey("title"))
+                            outputObject["title"] = "Data Table";
+
+                        if (!outputObject.ContainsKey("columns"))
+                            outputObject["columns"] = new List<Dictionary<string, string>>
+                    {
+                        new Dictionary<string, string> { ["id"] = "col1", ["label"] = "Column 1" },
+                        new Dictionary<string, string> { ["id"] = "col2", ["label"] = "Column 2" }
+                    };
+
+                        if (!outputObject.ContainsKey("rows"))
+                            outputObject["rows"] = new List<Dictionary<string, string>>
+                    {
+                        new Dictionary<string, string> { ["col1"] = "No data available", ["col2"] = "Please try again" }
+                    };
+                        break;
+
+                    case "contact":
+                        if (!outputObject.ContainsKey("title"))
+                            outputObject["title"] = "Contact Form";
+
+                        if (!outputObject.ContainsKey("recipientName"))
+                            outputObject["recipientName"] = "Portfolio Owner";
+
+                        if (!outputObject.ContainsKey("recipientPosition"))
+                            outputObject["recipientPosition"] = "Full Stack Developer";
+
+                        if (!outputObject.ContainsKey("emailSubject"))
+                            outputObject["emailSubject"] = "Contact from Portfolio Website";
+
+                        if (!outputObject.ContainsKey("socialLinks"))
+                            outputObject["socialLinks"] = new List<Dictionary<string, string>>
+                    {
+                        new Dictionary<string, string> { ["platform"] = "LinkedIn", ["url"] = "#", ["icon"] = "linkedin" }
+                    };
+                        break;
+
+                    case "pdf":
+                        if (!outputObject.ContainsKey("title"))
+                            outputObject["title"] = "Document.pdf";
+
+                        if (!outputObject.ContainsKey("totalPages"))
+                            outputObject["totalPages"] = 1;
+
+                        if (!outputObject.ContainsKey("lastUpdated"))
+                            outputObject["lastUpdated"] = DateTime.Now.ToString("MMMM yyyy");
+
+                        if (!outputObject.ContainsKey("content"))
+                            outputObject["content"] = new List<Dictionary<string, string>>
+                    {
+                        new Dictionary<string, string> {
+                            ["pageNumber"] = "1",
+                            ["heading"] = "Document Content",
+                            ["summary"] = "Document content could not be loaded."
+                        }
+                    };
+                        break;
+                }
+
+                // Serialize the validated object back to a JSON string
+                return JsonSerializer.Serialize(outputObject);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, $"Error validating JSON for format type {formatType}");
+                return jsonData; // Return original data on error
+            }}
         // Get or create a persistent session ID for the user
         private async Task<string> GetOrCreateSessionId(string ipAddress)
         {
