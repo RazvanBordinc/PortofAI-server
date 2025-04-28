@@ -232,4 +232,10 @@ namespace Portfolio_server.Models
         [ForeignKey("SkillId")]
         public virtual Skill? Skill { get; set; }
     }
+    public class ProcessedResponse
+    {
+        public string Text { get; set; } = string.Empty;
+        public string Format { get; set; } = string.Empty;
+        public object? FormatData { get; set; } = null;
+    }
 }

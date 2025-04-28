@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using StackExchange.Redis;
 using System;
+using Portfolio_server.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -14,7 +15,7 @@ builder.Services.AddSwaggerGen();
 // Add HTTP client
 builder.Services.AddHttpClient();
 
-// Redis connection configuration - Update this section in Program.cs
+// Redis connection configuration
 try
 {
     var options = new ConfigurationOptions
@@ -47,12 +48,16 @@ catch (Exception ex)
     builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect("localhost"));
 }
 
-// Configure HTTP client for FastAPI
-builder.Services.AddHttpClient("FastAPI", client =>
+// Register our services
+builder.Services.AddSingleton<IConversationService, ConversationService>();
+builder.Services.AddSingleton<IRateLimiterService, RateLimiterService>();
+builder.Services.AddScoped<IGeminiService, GeminiService>();
+
+// Configure HTTP client for Gemini API
+builder.Services.AddHttpClient<IGeminiService, GeminiService>(client =>
 {
-    var fastApiUrl = builder.Configuration["FastAPIUrl"] ?? "http://localhost:8000";
-    client.BaseAddress = new Uri(fastApiUrl);
-    client.Timeout = TimeSpan.FromSeconds(30); // Set a reasonable timeout
+    client.BaseAddress = new Uri("https://generativelanguage.googleapis.com/");
+    client.Timeout = TimeSpan.FromSeconds(30);
 });
 
 // Configure CORS
