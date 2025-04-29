@@ -26,7 +26,7 @@ namespace Portfolio_server.Controllers
         private readonly IConversationService _conversationService;
         private readonly IRateLimiterService _rateLimiterService;
         private readonly IPortfolioService _portfolioService;
-        private readonly SmtpOptions _smtp;
+        private readonly IEmailService _emailService;
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30); // Increased timeout for streaming
 
         public MainController(
@@ -35,7 +35,7 @@ namespace Portfolio_server.Controllers
             IConversationService conversationService,
             IRateLimiterService rateLimiterService,
             IPortfolioService portfolioService,
-            IOptions<SmtpOptions> smtpOptions
+            IEmailService emailService
         )
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -43,10 +43,31 @@ namespace Portfolio_server.Controllers
             _conversationService = conversationService ?? throw new ArgumentNullException(nameof(conversationService));
             _rateLimiterService = rateLimiterService ?? throw new ArgumentNullException(nameof(rateLimiterService));
             _portfolioService = portfolioService ?? throw new ArgumentNullException(nameof(portfolioService));
-            _smtp = smtpOptions?.Value ?? throw new ArgumentNullException(nameof(smtpOptions));
+            _emailService = emailService ?? throw new ArgumentNullException(nameof(emailService));
         }
 
-      
+        // New endpoint to get remaining requests
+        [HttpGet("remaining")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetRemainingRequests()
+        {
+            try
+            {
+                string ipAddress = GetClientIpAddress();
+                int maxRequests = 15; // Default max requests
+
+                int remaining = await _rateLimiterService.GetRemainingRequestsAsync(ipAddress, maxRequests);
+
+                return Ok(new { remaining });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting remaining requests");
+                return StatusCode(500, new { error = "Error getting remaining requests" });
+            }
+        }
+
         // New streaming chat endpoint
         [HttpPost("chat/stream")]
         [ProducesResponseType(typeof(string), StatusCodes.Status200OK)]
@@ -119,15 +140,27 @@ namespace Portfolio_server.Controllers
 
                 try
                 {
-                    // Set up the response for streaming
+                    // IMPORTANT: Set up the response for streaming with proper SSE headers
                     Response.StatusCode = StatusCodes.Status200OK;
+
+                    // Clear any existing headers to avoid conflicts
+                    Response.Headers.Clear();
+
+                    // Set SSE headers
                     Response.ContentType = "text/event-stream";
                     Response.Headers.Add("Cache-Control", "no-cache");
                     Response.Headers.Add("Connection", "keep-alive");
                     Response.Headers.Add("X-Accel-Buffering", "no"); // For Nginx
+                    Response.Headers.Add("Access-Control-Allow-Origin", "*"); // Enable CORS for SSE
 
                     // Process the message using the Gemini service with streaming
                     _logger.LogInformation($"[{requestId}] Starting streaming response from Gemini service");
+
+                    // Send a heartbeat immediately to establish the connection
+                    await WriteHeartbeatAsync();
+
+                    // Accumulate the full response
+                    var responseBuilder = new StringBuilder();
 
                     // Call the streaming version of the service
                     string fullResponse = await _geminiService.StreamMessageAsync(
@@ -136,19 +169,32 @@ namespace Portfolio_server.Controllers
                         request.Style ?? "NORMAL",
                         async (chunk) =>
                         {
+                            // Add to full response
+                            responseBuilder.Append(chunk);
+
+                            // Write chunk to client
                             await WriteChunkAsync(chunk);
+
+                            // Send heartbeat after each chunk to keep connection alive
+                            await WriteHeartbeatAsync();
                         },
                         linkedCts.Token
                     );
+
+                    // If the fullResponse is empty but we accumulated chunks, use those instead
+                    if (string.IsNullOrEmpty(fullResponse) && responseBuilder.Length > 0)
+                    {
+                        fullResponse = responseBuilder.ToString();
+                    }
+
+                    // Send the completion SSE event
+                    await WriteDoneAsync(fullResponse);
 
                     // Increment rate limit counter
                     await _rateLimiterService.IncrementRateLimitAsync(ipAddress);
 
                     // Save the conversation after the full response is generated
                     await _conversationService.SaveConversationAsync(sessionId, request.Message, fullResponse);
-
-                    // Send the completion SSE event
-                    await WriteDoneAsync(fullResponse);
 
                     sw.Stop();
                     _logger.LogInformation($"[{requestId}] Streaming chat request completed in {sw.ElapsedMilliseconds}ms");
@@ -177,13 +223,57 @@ namespace Portfolio_server.Controllers
             }
         }
 
+        // New endpoint for handling contact form submissions
+        [HttpPost("contact")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> SubmitContactForm([FromBody] ContactRequest request)
+        {
+            if (request == null || string.IsNullOrEmpty(request.Name) ||
+                string.IsNullOrEmpty(request.Email) || string.IsNullOrEmpty(request.Message))
+            {
+                return BadRequest(new { message = "Name, email, and message are required" });
+            }
+
+            try
+            {
+                // Log the contact form submission
+                _logger.LogInformation($"Contact form submission from {request.Name} ({request.Email})");
+
+                // Send email using the email service
+                bool emailSent = await _emailService.SendContactEmailAsync(request);
+
+                if (emailSent)
+                {
+                    return Ok(new { message = "Your message has been sent successfully" });
+                }
+                else
+                {
+                    // Email failed to send but didn't throw an exception
+                    _logger.LogWarning($"Failed to send contact email from {request.Name} ({request.Email})");
+
+                    // We'll still consider this a success from the user's perspective
+                    // as we've logged the message and can handle it manually if needed
+                    return Ok(new { message = "Your message has been received. Thank you for contacting us." });
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error processing contact form submission");
+                return StatusCode(500, new { message = "An error occurred while sending your message. Please try again later." });
+            }
+        }
+
         private async Task WriteChunkAsync(string chunk)
         {
             if (string.IsNullOrEmpty(chunk)) return;
 
+            // Format the chunk as a proper SSE data event
             string escapedData = chunk.Replace("\n", "\\n").Replace("\r", "\\r");
-            string message = $"data: {escapedData}\n\n";
+            string message = $"event: message\ndata: {escapedData}\n\n";
             byte[] bytes = Encoding.UTF8.GetBytes(message);
+
             await Response.Body.WriteAsync(bytes);
             await Response.Body.FlushAsync();
         }
@@ -200,6 +290,19 @@ namespace Portfolio_server.Controllers
             string jsonData = JsonSerializer.Serialize(completionData);
             string message = $"event: done\ndata: {jsonData}\n\n";
             byte[] bytes = Encoding.UTF8.GetBytes(message);
+
+            await Response.Body.WriteAsync(bytes);
+            await Response.Body.FlushAsync();
+
+            // Add a final heartbeat/comment to ensure the done event is processed
+            await WriteHeartbeatAsync();
+        }
+        private async Task WriteHeartbeatAsync()
+        {
+            // Send a comment (heartbeat) to keep the connection alive
+            string heartbeat = $": heartbeat {DateTime.UtcNow.Ticks}\n\n";
+            byte[] bytes = Encoding.UTF8.GetBytes(heartbeat);
+
             await Response.Body.WriteAsync(bytes);
             await Response.Body.FlushAsync();
         }
@@ -212,8 +315,75 @@ namespace Portfolio_server.Controllers
             var error = new { error = errorMessage };
             await Response.WriteAsJsonAsync(error);
         }
+        // Add this method to your MainController.cs class
 
-        // Remaining controller methods (ping, health, etc.) are unchanged...
+        [HttpGet("debug-gemini")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> DebugGemini()
+        {
+            try
+            {
+                var requestId = Guid.NewGuid().ToString("N");
+                _logger.LogInformation($"[{requestId}] Debug Gemini API request initiated");
+
+                // Get environment variables and configuration
+                var apiKey = Environment.GetEnvironmentVariable("GOOGLE_API_KEY") ?? "Not set in environment";
+                var configApiKey = HttpContext.RequestServices
+                    .GetService<IConfiguration>()
+                    .GetSection("GeminiApi")["ApiKey"] ?? "Not set in configuration";
+
+                var modelName = (_geminiService as GeminiService)?.GetModelName() ?? "Unknown";
+
+                // Try a simple test request
+                var response = await _geminiService.ProcessMessageAsync(
+                    "Give a one-word response as a test of the API connection.",
+                    "debug-session",
+                    "NORMAL");
+
+                _logger.LogInformation($"[{requestId}] Debug Gemini API request completed successfully");
+
+                return Ok(new
+                {
+                    status = "success",
+                    message = "Gemini API is working correctly",
+                    timestamp = DateTime.UtcNow,
+                    apiKeyFromEnv = $"Length: {apiKey.Length}, First chars: {(apiKey.Length > 5 ? apiKey.Substring(0, 5) + "..." : "Too short!")}",
+                    apiKeyFromConfig = $"Length: {configApiKey.Length}, First chars: {(configApiKey.Length > 5 ? configApiKey.Substring(0, 5) + "..." : "Too short!")}",
+                    modelName = modelName,
+                    response = response
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in debug Gemini API endpoint");
+
+                return StatusCode(500, new
+                {
+                    status = "error",
+                    message = "Failed to connect to Gemini API",
+                    error = ex.GetType().Name + ": " + ex.Message,
+                    timestamp = DateTime.UtcNow,
+                    innerException = ex.InnerException?.Message,
+                    stackTrace = ex.StackTrace?.Split('\n').Take(10).ToArray() // Limited stack trace
+                });
+            }
+        }
+        // Health check endpoint
+        [HttpGet("health")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public IActionResult HealthCheck()
+        {
+            return Ok(new { status = "healthy", timestamp = DateTime.UtcNow });
+        }
+
+        // Ping endpoint for testing
+        [HttpGet("ping")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        public IActionResult Ping()
+        {
+            return Ok(new { message = "pong", timestamp = DateTime.UtcNow });
+        }
 
         /// <summary>
         /// Gets the client IP address from request headers or connection info

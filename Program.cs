@@ -58,6 +58,7 @@ catch (Exception ex)
 builder.Services.AddSingleton<IConversationService, ConversationService>();
 builder.Services.AddSingleton<IRateLimiterService, RateLimiterService>();
 builder.Services.AddScoped<IGeminiService, GeminiService>();
+builder.Services.AddScoped<IEmailService, EmailService>(); // Register the new EmailService
 
 // Register Portfolio Service
 builder.Services.AddSingleton<IPortfolioService, RedisPortfolioService>();
@@ -68,9 +69,12 @@ builder.Services.AddHttpClient<IGeminiService, GeminiService>(client =>
     client.BaseAddress = new Uri("https://generativelanguage.googleapis.com/");
     client.Timeout = TimeSpan.FromSeconds(30);
 });
+
+// Configure SMTP options
 builder.Services.Configure<SmtpOptions>(
     builder.Configuration.GetSection("Smtp")
 );
+
 // Configure CORS
 builder.Services.AddCors(options =>
 {

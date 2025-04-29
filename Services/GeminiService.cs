@@ -3,7 +3,6 @@ using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -32,21 +31,30 @@ namespace Portfolio_server.Services
             _httpClient = httpClient;
             _conversationService = conversationService;
 
-            // Configure API parameters
+            // Get API key
             _apiKey = configuration["GeminiApi:ApiKey"] ??
-                      Environment.GetEnvironmentVariable("GOOGLE_API_KEY") ??
-                      throw new InvalidOperationException("Gemini API key not configured");
+                      Environment.GetEnvironmentVariable("GOOGLE_API_KEY")!;
 
+            if (string.IsNullOrEmpty(_apiKey))
+            {
+                _logger.LogError("Gemini API key not configured. Please set GeminiApi:ApiKey in configuration or GOOGLE_API_KEY environment variable.");
+                throw new InvalidOperationException("Gemini API key not configured");
+            }
+
+            _logger.LogInformation($"API key configured with length: {_apiKey.Length}");
+
+            // Get model name
             _modelName = configuration["GeminiApi:ModelName"] ?? "gemini-2.0-flash";
+            _logger.LogInformation($"Using model: {_modelName}");
 
-            // Configure JSON serialization options
+            // Configure JSON options
             _jsonOptions = new JsonSerializerOptions
             {
                 PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
                 WriteIndented = false
             };
 
-            // Set the base address if not already set
+            // Set base address
             if (_httpClient.BaseAddress == null)
             {
                 _httpClient.BaseAddress = new Uri("https://generativelanguage.googleapis.com/");
@@ -61,23 +69,21 @@ namespace Portfolio_server.Services
             {
                 _logger.LogInformation($"Processing message with style: {style}");
 
-                // Retrieve conversation history
+                // Get history
                 string conversationHistory = await _conversationService.GetConversationHistoryAsync(sessionId);
 
-                // Prepare the prompt with conversation context and style instruction
+                // Build prompt
                 string promptText = BuildPrompt(message, conversationHistory, style);
 
-                // Call the Gemini API
+                // Call API
                 string response = await CallGeminiApiAsync(promptText);
 
-                // Process the response to extract any special format information
+                // Process response
                 return ProcessResponse(response);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error processing message with GeminiService");
-
-                // Return a graceful error response
                 return new ProcessedResponse
                 {
                     Text = "I'm sorry, I encountered a technical issue and couldn't process your request. Please try again later.",
@@ -86,7 +92,7 @@ namespace Portfolio_server.Services
             }
         }
 
-        // New streaming method
+        // Simplified streaming implementation
         public async Task<string> StreamMessageAsync(
             string message,
             string sessionId,
@@ -98,95 +104,48 @@ namespace Portfolio_server.Services
             {
                 _logger.LogInformation($"Streaming message with style: {style}");
 
-                // Retrieve conversation history
+                // Get conversation history
                 string conversationHistory = await _conversationService.GetConversationHistoryAsync(sessionId);
 
-                // Prepare the prompt with conversation context and style instruction
+                // Build prompt
                 string promptText = BuildPrompt(message, conversationHistory, style);
 
-                // Call the Gemini API with streaming
-                var responseBuilder = new StringBuilder();
-                bool isFormatTagSent = false;
-                bool isDataTagStarted = false;
-                bool isDataTagComplete = false;
-                StringBuilder dataTagBuilder = null;
-                string format = "text";
+                // Instead of streaming, use the non-streaming method and simulate streaming
+                // This is a temporary fallback until the streaming issues are fixed
+                string fullResponse = await CallGeminiApiAsync(promptText);
 
-                // First check for format in the message
-                bool isContactQuery = IsContactQuery(message);
+                _logger.LogInformation($"Generated full response length: {fullResponse?.Length ?? 0}");
 
-                await StreamGeminiApiAsync(
-                    promptText,
-                    async (chunk) =>
-                    {
-                        // Process the chunk
-                        string processedChunk = chunk;
+                if (string.IsNullOrEmpty(fullResponse))
+                {
+                    // If we got no response, create a fallback
+                    fullResponse = "I'm sorry, I couldn't generate a response at this time. Please try again later.";
+                    await onChunkReceived(fullResponse);
+                    return fullResponse;
+                }
 
-                        // Check for and handle format tags
-                        if (!isFormatTagSent && chunk.Contains("[format:"))
-                        {
-                            var formatMatch = Regex.Match(chunk, @"\[format:(\w+)\]");
-                            if (formatMatch.Success)
-                            {
-                                format = formatMatch.Groups[1].Value.ToLower();
-                                isFormatTagSent = true;
+                // Simulate streaming by chunking the response
+                int chunkSize = 25; // Characters per chunk
 
-                                // Remove the format tag from the displayed text
-                                processedChunk = processedChunk.Replace(formatMatch.Value, "");
-                            }
-                        }
+                for (int i = 0; i < fullResponse.Length; i += chunkSize)
+                {
+                    // Check for cancellation
+                    if (cancellationToken.IsCancellationRequested)
+                        break;
 
-                        // Handle data tags (don't stream them, collect and process at the end)
-                        if (!isDataTagComplete)
-                        {
-                            // Check if data tag starts in this chunk
-                            int dataTagStart = chunk.IndexOf("[data:");
-                            if (dataTagStart >= 0 && !isDataTagStarted)
-                            {
-                                isDataTagStarted = true;
-                                dataTagBuilder = new StringBuilder();
-                                dataTagBuilder.Append(chunk.Substring(dataTagStart));
+                    // Get chunk (up to chunkSize or end of text)
+                    int remainingLength = Math.Min(chunkSize, fullResponse.Length - i);
+                    string chunk = fullResponse.Substring(i, remainingLength);
 
-                                // Remove the data part from the chunk sent to the client
-                                processedChunk = processedChunk.Substring(0, dataTagStart);
-                            }
-                            else if (isDataTagStarted)
-                            {
-                                // Continue collecting the data tag
-                                dataTagBuilder.Append(chunk);
+                    // Send chunk to client
+                    await onChunkReceived(chunk);
 
-                                // Check if data tag completes in this chunk
-                                int dataTagEnd = chunk.IndexOf("]");
-                                if (dataTagEnd >= 0)
-                                {
-                                    isDataTagComplete = true;
-                                }
+                    // Small delay to simulate typing
+                    await Task.Delay(50, cancellationToken);
+                }
 
-                                // Don't send data tag content to the client
-                                processedChunk = "";
-                            }
-                        }
-
-                        // Remove [/format] if present
-                        processedChunk = processedChunk.Replace("[/format]", "");
-
-                        // Add to the full response
-                        responseBuilder.Append(chunk);
-
-                        // Only send the chunk if it has content after processing
-                        if (!string.IsNullOrEmpty(processedChunk))
-                        {
-                            await onChunkReceived(processedChunk);
-                        }
-                    },
-                    cancellationToken
-                );
-
-                // Process the complete response for special formatting
-                string fullResponse = responseBuilder.ToString();
-
-                // If this was a contact query and no format tag was detected, add it
-                if (isContactQuery && format == "text" && !fullResponse.Contains("[format:contact]"))
+                // Check for contact query in original message
+                if (IsContactQuery(message) && !fullResponse.Contains("[format:contact]"))
                 {
                     fullResponse = EnhanceContactResponse(fullResponse);
                 }
@@ -195,17 +154,14 @@ namespace Portfolio_server.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error streaming message with GeminiService");
-
-                // Return an error message
-                await onChunkReceived("I'm sorry, I encountered a technical issue and couldn't process your request. Please try again later.");
+                _logger.LogError(ex, "Error in StreamMessageAsync");
+                await onChunkReceived("I'm sorry, I encountered a technical issue and couldn't process your request.");
                 return "Error processing request";
             }
         }
 
         private bool IsContactQuery(string message)
         {
-            // Simple pattern matching for contact-related queries
             string lowerMessage = message.ToLower();
             return lowerMessage.Contains("contact") ||
                    lowerMessage.Contains("email") ||
@@ -246,9 +202,6 @@ namespace Portfolio_server.Services
                 // Serialize to JSON without indentation to avoid formatting issues
                 string jsonData = JsonSerializer.Serialize(contactData, _jsonOptions);
 
-                // Log the JSON for debugging
-                _logger.LogDebug($"Generated contact form JSON: {jsonData}");
-
                 // Format the contact response
                 return $"{response}\n\nYou can contact me using the form below:\n\n[format:contact][data:{jsonData}][/format]";
             }
@@ -280,9 +233,8 @@ namespace Portfolio_server.Services
             promptBuilder.AppendLine("\nCurrent message:");
             promptBuilder.AppendLine(message);
 
-            // Add instructions for contact form responses if needed
-            bool isContactQuery = IsContactQuery(message);
-            if (isContactQuery)
+            // Add special instructions if needed
+            if (IsContactQuery(message))
             {
                 promptBuilder.AppendLine("\nThis is a contact-related query. Please provide my contact information.");
             }
@@ -295,13 +247,9 @@ namespace Portfolio_server.Services
             return style.ToUpper() switch
             {
                 "FORMAL" => "Respond in a formal, professional tone. Use proper grammar and avoid contractions or colloquialisms. Structure your responses clearly with proper paragraphs.",
-
                 "EXPLANATORY" => "Respond in a teaching style that explains concepts thoroughly. Use examples where appropriate and break down complex ideas into simpler components. Number your points when listing multiple items.",
-
                 "MINIMALIST" => "Respond with brevity. Keep answers concise and to the point. Avoid unnecessary elaboration and focus on delivering essential information only.",
-
                 "HR" => "Respond in a warm, professional tone suitable for HR or recruitment conversations. Emphasize professional achievements, soft skills, and culture fit aspects.",
-
                 _ => "Respond in a balanced, conversational tone. Be helpful, clear, and friendly."
             };
         }
@@ -312,6 +260,7 @@ namespace Portfolio_server.Services
             {
                 // Construct the API endpoint URL with the API key
                 string apiUrl = $"v1beta/models/{_modelName}:generateContent?key={_apiKey}";
+                _logger.LogDebug($"Using API URL: {apiUrl.Replace(_apiKey, "API_KEY_REDACTED")}");
 
                 // Prepare the request payload
                 var requestData = new
@@ -348,144 +297,95 @@ namespace Portfolio_server.Services
                 string jsonContent = JsonSerializer.Serialize(requestData, _jsonOptions);
                 var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
+                _logger.LogInformation("Sending request to Gemini API");
+
                 // Send the request
                 var response = await _httpClient.PostAsync(apiUrl, content);
 
-                // Ensure successful response
-                response.EnsureSuccessStatusCode();
+                // Log response code
+                _logger.LogDebug($"Gemini API response status code: {(int)response.StatusCode} {response.StatusCode}");
+
+                // If the response is not successful, handle different error cases
+                if (!response.IsSuccessStatusCode)
+                {
+                    string errorMessage = await response.Content.ReadAsStringAsync();
+                    _logger.LogError($"Gemini API Error: Status {response.StatusCode}, Message: {errorMessage}");
+
+                    // Provide a more helpful error message based on status code
+                    return (int)response.StatusCode switch
+                    {
+                        400 => "I'm sorry, there was an issue with the request. Please try again later.",
+                        401 => "I'm currently unable to access my knowledge due to authentication issues. Please check your API key configuration.",
+                        403 => "I don't have permission to access that information right now.",
+                        404 => "I'm sorry, I couldn't find the information you're looking for.",
+                        429 => "I'm currently experiencing high demand. Please try again in a little while.",
+                        _ => "I'm sorry, I'm having trouble processing your request right now. Please try again later."
+                    };
+                }
 
                 // Parse the response
                 string responseJson = await response.Content.ReadAsStringAsync();
-                var responseObj = JsonSerializer.Deserialize<JsonNode>(responseJson);
+                _logger.LogDebug($"Received response from Gemini API, length: {responseJson.Length}");
 
-                // Extract the text content from the response
-                string textContent = responseObj?["candidates"]?[0]?["content"]?["parts"]?[0]?["text"]?.GetValue<string>() ??
-                    throw new InvalidOperationException("Failed to extract text content from Gemini API response");
-
-                return textContent;
-            }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogError(ex, "HTTP error calling Gemini API");
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error calling Gemini API");
-                throw;
-            }
-        }
-
-        private async Task StreamGeminiApiAsync(
-            string promptText,
-            Func<string, Task> onChunkReceived,
-            CancellationToken cancellationToken)
-        {
-            try
-            {
-                // Construct the API endpoint URL with the API key and stream=true
-                string apiUrl = $"v1beta/models/{_modelName}:streamGenerateContent?key={_apiKey}";
-
-                // Prepare the request payload - similar to non-streaming but with stream=true
-                var requestData = new
+                try
                 {
-                    contents = new[]
+                    // Try to parse the JSON response
+                    var responseObj = JsonSerializer.Deserialize<JsonElement>(responseJson);
+
+                    // Check if candidates array exists and has at least one element
+                    if (responseObj.TryGetProperty("candidates", out var candidates) &&
+                        candidates.ValueKind == JsonValueKind.Array &&
+                        candidates.GetArrayLength() > 0)
                     {
-                        new
+                        // Get the first candidate
+                        var candidate = candidates[0];
+
+                        // Check if it has content
+                        if (candidate.TryGetProperty("content", out var contentT))
                         {
-                            role = "user",
-                            parts = new[]
+                            // Check if content has parts
+                            if (contentT.TryGetProperty("parts", out var parts) &&
+                                parts.ValueKind == JsonValueKind.Array &&
+                                parts.GetArrayLength() > 0)
                             {
-                                new { text = promptText }
-                            }
-                        }
-                    },
-                    generationConfig = new
-                    {
-                        temperature = 0.7,
-                        topK = 40,
-                        topP = 0.95,
-                        maxOutputTokens = 8192,
-                        stopSequences = Array.Empty<string>()
-                    },
-                    safetySettings = new[]
-                    {
-                        new { category = "HARM_CATEGORY_HARASSMENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
-                        new { category = "HARM_CATEGORY_HATE_SPEECH", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
-                        new { category = "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
-                        new { category = "HARM_CATEGORY_DANGEROUS_CONTENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" }
-                    }
-                };
+                                // Get first part
+                                var part = parts[0];
 
-                // Serialize to JSON
-                string jsonContent = JsonSerializer.Serialize(requestData, _jsonOptions);
-                var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
-
-                // Send the request
-                using var request = new HttpRequestMessage(HttpMethod.Post, apiUrl)
-                {
-                    Content = content
-                };
-
-                using var response = await _httpClient.SendAsync(
-                    request,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    cancellationToken);
-
-                // Ensure successful response
-                response.EnsureSuccessStatusCode();
-
-                // Process the streaming response
-                using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                using var reader = new StreamReader(stream);
-
-                string line;
-                while ((line = await reader.ReadLineAsync()) != null && !cancellationToken.IsCancellationRequested)
-                {
-                    // Skip empty lines or metadata
-                    if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("{")) continue;
-
-                    try
-                    {
-                        var json = JsonSerializer.Deserialize<JsonNode>(line);
-
-                        // Extract text from the streaming response
-                        var candidates = json?["candidates"];
-                        if (candidates != null && candidates is JsonArray candidatesArray && candidatesArray.Count > 0)
-                        {
-                            var contentt = candidatesArray[0]?["content"];
-                            var parts = contentt?["parts"];
-                            if (parts != null && parts is JsonArray partsArray && partsArray.Count > 0)
-                            {
-                                var text = partsArray[0]?["text"]?.GetValue<string>();
-                                if (!string.IsNullOrEmpty(text))
+                                // Get text
+                                if (part.TryGetProperty("text", out var textElement))
                                 {
-                                    await onChunkReceived(text);
+                                    string text = textElement.GetString();
+                                    if (!string.IsNullOrEmpty(text))
+                                    {
+                                        _logger.LogInformation($"Successfully extracted response text (length: {text.Length})");
+                                        return text;
+                                    }
                                 }
                             }
                         }
                     }
-                    catch (JsonException ex)
-                    {
-                        _logger.LogWarning(ex, $"Error parsing JSON from streaming response: {line}");
-                        // Continue to next line, don't fail the whole response
-                    }
+
+                    // If we got here, we couldn't extract the text
+                    _logger.LogWarning("Could not extract text from Gemini API response. JSON structure: " + responseJson);
+
+                    // Return a fallback response
+                    return "I'm sorry, I couldn't generate a proper response. Please try again.";
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogError(ex, "Error parsing Gemini API response JSON");
+                    return "I'm sorry, there was an error processing the response from my knowledge source.";
                 }
             }
             catch (HttpRequestException ex)
             {
-                _logger.LogError(ex, "HTTP error streaming from Gemini API");
-                throw;
-            }
-            catch (OperationCanceledException)
-            {
-                _logger.LogInformation("Streaming request was cancelled");
-                throw;
+                _logger.LogError(ex, "HTTP error calling Gemini API");
+                return "I'm having trouble connecting to my knowledge source right now. Please try again later.";
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error streaming from Gemini API");
-                throw;
+                _logger.LogError(ex, "Unexpected error calling Gemini API");
+                return "I'm sorry, an unexpected error occurred while processing your request.";
             }
         }
 
@@ -591,6 +491,24 @@ namespace Portfolio_server.Services
             jsonStr = Regex.Replace(jsonStr, @"[\x00-\x1F]", " ");
 
             return jsonStr;
+        }
+
+        // Helper method for debugging
+        public string GetModelName()
+        {
+            return _modelName;
+        }
+
+        // Helper method to debug API key
+        public string GetApiKeyPreview()
+        {
+            if (string.IsNullOrEmpty(_apiKey))
+                return "Not set";
+
+            if (_apiKey.Length <= 5)
+                return "Too short";
+
+            return $"{_apiKey.Substring(0, 5)}... (length: {_apiKey.Length})";
         }
     }
 }
