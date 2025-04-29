@@ -4,6 +4,9 @@ using Microsoft.Extensions.Hosting;
 using StackExchange.Redis;
 using System;
 using Portfolio_server.Services;
+using Portfolio_server.Services.Portfolio_server.Services;
+using Portfolio_server.Models;
+
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -12,8 +15,11 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Add HTTP client
-builder.Services.AddHttpClient();
+// Add HTTP client for GitHub API
+builder.Services.AddHttpClient("GitHubClient");
+
+// Register GitHubDataFetcherService with correct namespace
+builder.Services.AddHostedService<GitHubDataFetcherService>();
 
 // Redis connection configuration
 try
@@ -53,13 +59,18 @@ builder.Services.AddSingleton<IConversationService, ConversationService>();
 builder.Services.AddSingleton<IRateLimiterService, RateLimiterService>();
 builder.Services.AddScoped<IGeminiService, GeminiService>();
 
+// Register Portfolio Service
+builder.Services.AddSingleton<IPortfolioService, RedisPortfolioService>();
+
 // Configure HTTP client for Gemini API
 builder.Services.AddHttpClient<IGeminiService, GeminiService>(client =>
 {
     client.BaseAddress = new Uri("https://generativelanguage.googleapis.com/");
     client.Timeout = TimeSpan.FromSeconds(30);
 });
-
+builder.Services.Configure<SmtpOptions>(
+    builder.Configuration.GetSection("Smtp")
+);
 // Configure CORS
 builder.Services.AddCors(options =>
 {
