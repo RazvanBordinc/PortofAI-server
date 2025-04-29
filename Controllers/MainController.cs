@@ -164,22 +164,22 @@ namespace Portfolio_server.Controllers
 
                     // Call the streaming version of the service
                     string fullResponse = await _geminiService.StreamMessageAsync(
-                        enrichedMessage,
-                        sessionId,
-                        request.Style ?? "NORMAL",
-                        async (chunk) =>
-                        {
-                            // Add to full response
-                            responseBuilder.Append(chunk);
+                          enrichedMessage,
+                          sessionId,
+                          request.Style ?? "NORMAL",
+                          async (chunk) =>
+                          {
+                              // Add to full response
+                              responseBuilder.Append(chunk);
 
-                            // Write chunk to client
-                            await WriteChunkAsync(chunk);
+                              // Write chunk to client
+                              await WriteChunkAsync(chunk);
 
-                            // Send heartbeat after each chunk to keep connection alive
-                            await WriteHeartbeatAsync();
-                        },
-                        linkedCts.Token
-                    );
+                              // Send heartbeat after each chunk to keep connection alive
+                              await WriteHeartbeatAsync();
+                          },
+                          linkedCts.Token
+                      );
 
                     // If the fullResponse is empty but we accumulated chunks, use those instead
                     if (string.IsNullOrEmpty(fullResponse) && responseBuilder.Length > 0)
@@ -187,7 +187,7 @@ namespace Portfolio_server.Controllers
                         fullResponse = responseBuilder.ToString();
                     }
 
-                    // Send the completion SSE event
+                    // Send the completion SSE event - this is where the final text is sent
                     await WriteDoneAsync(fullResponse);
 
                     // Increment rate limit counter
@@ -223,45 +223,58 @@ namespace Portfolio_server.Controllers
             }
         }
 
-        // New endpoint for handling contact form submissions
         [HttpPost("contact")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(object), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(object), StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> SubmitContactForm([FromBody] ContactRequest request)
         {
+            var requestId = Guid.NewGuid().ToString("N");
+            _logger.LogInformation($"[{requestId}] Contact form submission received from {request.Name} ({request.Email})");
+
             if (request == null || string.IsNullOrEmpty(request.Name) ||
                 string.IsNullOrEmpty(request.Email) || string.IsNullOrEmpty(request.Message))
             {
+                _logger.LogWarning($"[{requestId}] Invalid contact request: Missing required fields");
                 return BadRequest(new { message = "Name, email, and message are required" });
             }
 
             try
             {
-                // Log the contact form submission
-                _logger.LogInformation($"Contact form submission from {request.Name} ({request.Email})");
+                // Try to use the Redis portfolio service to get the recipient email
+                var ipAddress = GetClientIpAddress();
+                _logger.LogInformation($"[{requestId}] Processing contact request from {request.Name} from IP: {ipAddress}");
 
-                // Send email using the email service
+                // Try the email service
                 bool emailSent = await _emailService.SendContactEmailAsync(request);
 
                 if (emailSent)
                 {
+                    _logger.LogInformation($"[{requestId}] Email successfully sent from {request.Name}");
                     return Ok(new { message = "Your message has been sent successfully" });
                 }
                 else
                 {
                     // Email failed to send but didn't throw an exception
-                    _logger.LogWarning($"Failed to send contact email from {request.Name} ({request.Email})");
+                    _logger.LogWarning($"[{requestId}] Failed to send contact email from {request.Name} ({request.Email})");
 
-                    // We'll still consider this a success from the user's perspective
-                    // as we've logged the message and can handle it manually if needed
-                    return Ok(new { message = "Your message has been received. Thank you for contacting us." });
+                    // Since we're storing the request in Redis as a backup in the EmailService, 
+                    // we'll still indicate success to the user even though the email failed
+                    return Ok(new
+                    {
+                        message = "Your message has been received. Thank you for contacting us.",
+                        note = "Your message is saved and will be processed as soon as possible."
+                    });
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing contact form submission");
-                return StatusCode(500, new { message = "An error occurred while sending your message. Please try again later." });
+                _logger.LogError(ex, $"[{requestId}] Error processing contact form submission");
+                return StatusCode(500, new
+                {
+                    message = "An error occurred while sending your message. Please try again later or contact directly via email.",
+                    contactEmail = "razvan.bordinc@yahoo.com" // Provide direct contact email as fallback
+                });
             }
         }
 

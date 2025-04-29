@@ -184,26 +184,32 @@ namespace Portfolio_server.Services
                     emailSubject = "Portfolio Contact",
                     socialLinks = new[]
                     {
-                        new
-                        {
-                            platform = "LinkedIn",
-                            url = "https://linkedin.com/in/valentin-r%C4%83zvan-bord%C3%AEnc-30686a298/",
-                            icon = "linkedin"
-                        },
-                        new
-                        {
-                            platform = "GitHub",
-                            url = "https://github.com/RazvanBordinc",
-                            icon = "github"
-                        }
-                    }
+                new
+                {
+                    platform = "LinkedIn",
+                    url = "https://linkedin.com/in/valentin-r%C4%83zvan-bord%C3%AEnc-30686a298/",
+                    icon = "linkedin"
+                },
+                new
+                {
+                    platform = "GitHub",
+                    url = "https://github.com/RazvanBordinc",
+                    icon = "github"
+                },
+                new
+                {
+                    platform = "Email",
+                    url = "mailto:razvan.bordinc@yahoo.com",
+                    icon = "mail"
+                }
+            }
                 };
 
                 // Serialize to JSON without indentation to avoid formatting issues
                 string jsonData = JsonSerializer.Serialize(contactData, _jsonOptions);
 
                 // Format the contact response
-                return $"{response}\n\nYou can contact me using the form below:\n\n[format:contact][data:{jsonData}][/format]";
+                return $"{response}\n\nYou can contact me using the form below or directly at razvan.bordinc@yahoo.com:\n\n[format:contact][data:{jsonData}][/format]";
             }
             catch (Exception ex)
             {
@@ -216,11 +222,15 @@ namespace Portfolio_server.Services
         {
             var promptBuilder = new StringBuilder();
 
-            // Add system instructions
+            // Add system instructions with CORRECT contact information
             promptBuilder.AppendLine("You are an AI chatbot representing Razvan Bordinc, a software engineer. Use the information in the portfolio data to answer questions accurately about Razvan's skills, projects, and experience. If you don't know something, be honest and don't make up information.");
+            promptBuilder.AppendLine("\nImportant contact information:");
+            promptBuilder.AppendLine("- Email: razvan.bordinc@yahoo.com");
+            promptBuilder.AppendLine("- GitHub: https://github.com/RazvanBordinc");
+            promptBuilder.AppendLine("- LinkedIn: https://linkedin.com/in/valentin-r%C4%83zvan-bord%C3%AEnc-30686a298/");
 
             // Add style instructions based on the specified style
-            promptBuilder.AppendLine(GetStyleInstruction(style));
+            promptBuilder.AppendLine("\n" + GetStyleInstruction(style));
 
             // Add conversation history for context if available
             if (!string.IsNullOrWhiteSpace(conversationHistory))
@@ -236,11 +246,12 @@ namespace Portfolio_server.Services
             // Add special instructions if needed
             if (IsContactQuery(message))
             {
-                promptBuilder.AppendLine("\nThis is a contact-related query. Please provide my contact information.");
+                promptBuilder.AppendLine("\nThis is a contact-related query. Please provide my contact information. Always use razvan.bordinc@yahoo.com as the email address.");
             }
 
             return promptBuilder.ToString();
         }
+
 
         private string GetStyleInstruction(string style)
         {
