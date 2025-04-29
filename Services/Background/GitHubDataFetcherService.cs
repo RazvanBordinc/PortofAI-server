@@ -185,10 +185,7 @@ namespace Portfolio_server.Services
         {
             _logger.LogInformation("Processing projects data");
 
-            // Parse numbered projects from content
-            var projects = ParseNumberedItems(content);
-
-            // Store projects in Redis
+            // Store projects category
             var categoryKey = $"{PortfolioDataPrefix}category:projects";
             var categoryData = new PortfolioCategory
             {
@@ -199,6 +196,40 @@ namespace Portfolio_server.Services
             };
 
             await db.StringSetAsync(categoryKey, JsonSerializer.Serialize(categoryData));
+
+            // Check if there's a description field in the content
+            bool hasDescription = false;
+            string projectsDescription = "";
+
+            // Try to extract project description from content
+            var descriptionMatch = Regex.Match(content, @"(.+?)(\d+\.\s*)", RegexOptions.Singleline);
+            if (descriptionMatch.Success && descriptionMatch.Groups.Count > 1)
+            {
+                projectsDescription = descriptionMatch.Groups[1].Value.Trim();
+                hasDescription = !string.IsNullOrWhiteSpace(projectsDescription);
+
+                if (hasDescription)
+                {
+                    _logger.LogInformation($"Found projects description: {projectsDescription}");
+
+                    // Store description as a separate content item
+                    var descriptionItem = new PortfolioContent
+                    {
+                        Id = 999,
+                        CategoryId = 3, // Projects category ID
+                        Title = "Projects Overview",
+                        Content = projectsDescription,
+                        Tags = new List<string> { "projects", "overview", "description" },
+                        DisplayOrder = 0 // Show first
+                    };
+
+                    var descKey = $"{PortfolioDataPrefix}content:projects:description";
+                    await db.StringSetAsync(descKey, JsonSerializer.Serialize(descriptionItem));
+                }
+            }
+
+            // Parse numbered projects from content
+            var projects = ParseNumberedItems(content);
 
             // Store each project as a content item
             for (int i = 0; i < projects.Count; i++)
@@ -221,13 +252,13 @@ namespace Portfolio_server.Services
                 var contentKey = $"{PortfolioDataPrefix}content:projects:{i + 1}";
                 await db.StringSetAsync(contentKey, JsonSerializer.Serialize(contentItem));
 
-                // Also store as project entity
+                // Also store as project entity with more detailed information
                 var project = new ProjectEntity
                 {
                     Id = i + 1,
                     Name = projectName,
                     Description = projectDescription,
-                    Role = "Full Stack Developer",
+                    Role = "Software Engineer",
                     Highlights = projectDescription,
                     StartDate = DateTime.UtcNow.AddMonths(-6),
                     IsHighlighted = true,
@@ -237,6 +268,117 @@ namespace Portfolio_server.Services
                 var projectKey = $"{PortfolioDataPrefix}project:{i + 1}";
                 await db.StringSetAsync(projectKey, JsonSerializer.Serialize(project));
             }
+
+            // If we have both a description and a technology breakdown (likely in description from me.json)
+            if (projectsDescription.Contains("For the") && projectsDescription.Contains("I used"))
+            {
+                try
+                {
+                    // Process the technology descriptions for each project
+                    var techDescPattern = @"(\d+)\.\s*For the (.+?),\s*I used (.+?)\.";
+                    var techMatches = Regex.Matches(projectsDescription, techDescPattern);
+
+                    foreach (Match match in techMatches)
+                    {
+                        if (match.Groups.Count >= 4)
+                        {
+                            var projNumber = int.Parse(match.Groups[1].Value) - 1; // 0-based index
+                            if (projNumber >= 0 && projNumber < projects.Count)
+                            {
+                                var projName = match.Groups[2].Value.Trim();
+                                var techStack = match.Groups[3].Value.Trim();
+
+                                // Find the project by index or name
+                                var projectKey = $"{PortfolioDataPrefix}project:{projNumber + 1}";
+                                var projectJson = await db.StringGetAsync(projectKey);
+
+                                if (projectJson.HasValue)
+                                {
+                                    var project = JsonSerializer.Deserialize<ProjectEntity>(projectJson);
+                                    if (project != null)
+                                    {
+                                        // Update the project with tech stack info
+                                        project.Highlights += $"\n\nTechnologies: {techStack}";
+
+                                        // Save updated project
+                                        await db.StringSetAsync(projectKey, JsonSerializer.Serialize(project));
+
+                                        _logger.LogInformation($"Updated project {projNumber + 1} with tech stack: {techStack}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error processing project technology descriptions");
+                }
+            }
+        }
+
+       
+        private async Task ProcessProjectLinksFromField(IDatabase db, string links)
+        {
+            _logger.LogInformation("Processing project links from links field");
+
+            // Process numbered project links
+            var projectLinks = ParseNumberedItems(links);
+
+            for (int i = 0; i < projectLinks.Count; i++)
+            {
+                var linkText = projectLinks[i];
+                var parts = linkText.Split(": ", 2);
+                if (parts.Length != 2) continue;
+
+                var projectName = parts[0].Trim();
+                var projectUrl = parts[1].Trim();
+
+                // Look for project keys in Redis
+                var server = db.Multiplexer.GetServer(db.Multiplexer.GetEndPoints().First());
+                var pattern = $"{PortfolioDataPrefix}project:*";
+                var projectKeys = server.Keys(pattern: pattern).ToArray();
+
+                // Check each project for a name match
+                foreach (var projectKey in projectKeys)
+                {
+                    var projectJson = await db.StringGetAsync(projectKey);
+                    if (!projectJson.HasValue) continue;
+
+                    var project = JsonSerializer.Deserialize<ProjectEntity>(projectJson);
+                    if (project?.Name?.Contains(projectName, StringComparison.OrdinalIgnoreCase) == true)
+                    {
+                        // Update project with URL
+                        project.ProjectUrl = projectUrl;
+
+                        // Set GitHub URL if it's a GitHub link
+                        if (projectUrl.Contains("github.com"))
+                        {
+                            project.GitHubRepoUrl = projectUrl;
+                            project.IsOpenSource = true;
+                        }
+
+                        // Save updated project
+                        await db.StringSetAsync(projectKey, JsonSerializer.Serialize(project));
+                        _logger.LogInformation($"Updated project {project.Name} with URL: {projectUrl}");
+                        break;
+                    }
+                }
+            }
+
+            // Store links as content item
+            var contentItem = new PortfolioContent
+            {
+                Id = 500,
+                CategoryId = 3, // Projects category ID
+                Title = "Project Links",
+                Content = links,
+                Tags = new List<string> { "projects", "links", "github" },
+                DisplayOrder = 999 // Put at the end
+            };
+
+            var contentKey = $"{PortfolioDataPrefix}content:projectlinks";
+            await db.StringSetAsync(contentKey, JsonSerializer.Serialize(contentItem));
         }
 
         private async Task ProcessTechSkillsAsync(IDatabase db, string content)

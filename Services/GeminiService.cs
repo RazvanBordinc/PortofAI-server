@@ -1,135 +1,319 @@
 using System;
-using System.Collections.Generic;
-using System.Diagnostics.Metrics;
+using System.IO;
 using System.Net.Http;
-using System.Reflection.Metadata;
-using System.Runtime.Intrinsics.X86;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.EntityFrameworkCore.Metadata.Internal;
-using System.Xml;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Microsoft.SqlServer.Server;
-using Portfolio_server.Controllers;
 using Portfolio_server.Models;
-using StackExchange.Redis;
-using static System.Net.Mime.MediaTypeNames;
-using Microsoft.EntityFrameworkCore.Metadata;
-using System.Diagnostics.Contracts;
-using System.Xml.Linq;
 
 namespace Portfolio_server.Services
 {
-
-
     public class GeminiService : IGeminiService
     {
-        private readonly HttpClient _httpClient;
         private readonly ILogger<GeminiService> _logger;
+        private readonly HttpClient _httpClient;
         private readonly IConversationService _conversationService;
         private readonly string _apiKey;
         private readonly string _modelName;
+        private readonly JsonSerializerOptions _jsonOptions;
 
         public GeminiService(
-            HttpClient httpClient,
-            IConfiguration configuration,
             ILogger<GeminiService> logger,
-            IConversationService conversationService)
+            HttpClient httpClient,
+            IConversationService conversationService,
+            IConfiguration configuration)
         {
-            _httpClient = httpClient;
             _logger = logger;
+            _httpClient = httpClient;
             _conversationService = conversationService;
 
-            // Get API key and model name from configuration
-            _apiKey = configuration["GeminiApi:ApiKey"];
+            // Configure API parameters
+            _apiKey = configuration["GeminiApi:ApiKey"] ??
+                      Environment.GetEnvironmentVariable("GOOGLE_API_KEY") ??
+                      throw new InvalidOperationException("Gemini API key not configured");
+
             _modelName = configuration["GeminiApi:ModelName"] ?? "gemini-2.0-flash";
 
-            // Configure base address
-            _httpClient.BaseAddress = new Uri("https://generativelanguage.googleapis.com/");
+            // Configure JSON serialization options
+            _jsonOptions = new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                WriteIndented = false
+            };
+
+            // Set the base address if not already set
+            if (_httpClient.BaseAddress == null)
+            {
+                _httpClient.BaseAddress = new Uri("https://generativelanguage.googleapis.com/");
+            }
+
+            _logger.LogInformation($"GeminiService initialized with model: {_modelName}");
         }
 
         public async Task<ProcessedResponse> ProcessMessageAsync(string message, string sessionId, string style = "NORMAL")
         {
             try
             {
-                if (string.IsNullOrEmpty(_apiKey))
-                {
-                    _logger.LogError("Gemini API key is not configured");
-                    return new ProcessedResponse
-                    {
-                        Text = "I'm sorry, the AI service is not properly configured. The API key for Google Gemini is missing.",
-                        Format = "text"
-                    };
-                }
+                _logger.LogInformation($"Processing message with style: {style}");
 
-                // Get conversation history
+                // Retrieve conversation history
                 string conversationHistory = await _conversationService.GetConversationHistoryAsync(sessionId);
 
-                // Generate the prompt with style instructions
-                string promptText = GeneratePrompt(message, conversationHistory, style);
+                // Prepare the prompt with conversation context and style instruction
+                string promptText = BuildPrompt(message, conversationHistory, style);
 
-                // Call Gemini API
-                var response = await CallGeminiApiAsync(promptText);
+                // Call the Gemini API
+                string response = await CallGeminiApiAsync(promptText);
 
-                // Process response to extract format information
-                var processedResponse = ProcessGeminiResponse(response);
-
-                // Save the conversation
-                await _conversationService.SaveConversationAsync(sessionId, message, processedResponse.Text);
-
-                return processedResponse;
+                // Process the response to extract any special format information
+                return ProcessResponse(response);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing message with Gemini API");
+                _logger.LogError(ex, "Error processing message with GeminiService");
 
+                // Return a graceful error response
                 return new ProcessedResponse
                 {
-                    Text = "I'm sorry, I encountered an error processing your request. Please try again later.",
+                    Text = "I'm sorry, I encountered a technical issue and couldn't process your request. Please try again later.",
                     Format = "text"
                 };
             }
         }
 
-        private string GeneratePrompt(string message, string conversationHistory, string style)
+        // New streaming method
+        public async Task<string> StreamMessageAsync(
+            string message,
+            string sessionId,
+            string style,
+            Func<string, Task> onChunkReceived,
+            CancellationToken cancellationToken)
         {
-            var styleInstructions = GetStyleInstructions(style);
+            try
+            {
+                _logger.LogInformation($"Streaming message with style: {style}");
 
- 
-            var promptText = $@"You are a helpful, intelligent AI assistant for a portfolio website.
+                // Retrieve conversation history
+                string conversationHistory = await _conversationService.GetConversationHistoryAsync(sessionId);
 
-            {styleInstructions}
-            
-            You can enhance your responses by using special format tags for rich content display:
-            - [format:text]   – Plain text format (default if no format is specified)
-            - [format:contact]– Use when sharing contact information or a contact form
-            
-            For [format:contact], include a JSON data object with contact information. FOLLOW THIS EXACT FORMAT:
-               [data:{{""title"": ""Contact Information"", ""recipientName"": ""Your Name"", ""recipientPosition"": ""Your Position"", ""emailSubject"": ""Inquiry from Portfolio"", ""socialLinks"": [{{""platform"": ""LinkedIn"", ""url"": ""https://linkedin.com/in/example"", ""icon"": ""linkedin""}}]}}]
-            
-            CRITICAL JSON FORMATTING RULES:
-            - Always use double quotes ("" "") for property names and string values, never single quotes (' ')
-            - Don't include trailing commas (e.g., [1, 2, 3,] or {{""a"": 1, ""b"": 2,}})
-            - Make sure all JSON property names have quotes around them (e.g., {{""name"": ""value""}})
-            - Ensure all brackets and braces are properly balanced and closed
-            - Test your JSON format before including it in your response
-            
-            Current conversation:
-            {conversationHistory}
-            Human: {message}
-            AI: ";
+                // Prepare the prompt with conversation context and style instruction
+                string promptText = BuildPrompt(message, conversationHistory, style);
 
-            return promptText;
+                // Call the Gemini API with streaming
+                var responseBuilder = new StringBuilder();
+                bool isFormatTagSent = false;
+                bool isDataTagStarted = false;
+                bool isDataTagComplete = false;
+                StringBuilder dataTagBuilder = null;
+                string format = "text";
+
+                // First check for format in the message
+                bool isContactQuery = IsContactQuery(message);
+
+                await StreamGeminiApiAsync(
+                    promptText,
+                    async (chunk) =>
+                    {
+                        // Process the chunk
+                        string processedChunk = chunk;
+
+                        // Check for and handle format tags
+                        if (!isFormatTagSent && chunk.Contains("[format:"))
+                        {
+                            var formatMatch = Regex.Match(chunk, @"\[format:(\w+)\]");
+                            if (formatMatch.Success)
+                            {
+                                format = formatMatch.Groups[1].Value.ToLower();
+                                isFormatTagSent = true;
+
+                                // Remove the format tag from the displayed text
+                                processedChunk = processedChunk.Replace(formatMatch.Value, "");
+                            }
+                        }
+
+                        // Handle data tags (don't stream them, collect and process at the end)
+                        if (!isDataTagComplete)
+                        {
+                            // Check if data tag starts in this chunk
+                            int dataTagStart = chunk.IndexOf("[data:");
+                            if (dataTagStart >= 0 && !isDataTagStarted)
+                            {
+                                isDataTagStarted = true;
+                                dataTagBuilder = new StringBuilder();
+                                dataTagBuilder.Append(chunk.Substring(dataTagStart));
+
+                                // Remove the data part from the chunk sent to the client
+                                processedChunk = processedChunk.Substring(0, dataTagStart);
+                            }
+                            else if (isDataTagStarted)
+                            {
+                                // Continue collecting the data tag
+                                dataTagBuilder.Append(chunk);
+
+                                // Check if data tag completes in this chunk
+                                int dataTagEnd = chunk.IndexOf("]");
+                                if (dataTagEnd >= 0)
+                                {
+                                    isDataTagComplete = true;
+                                }
+
+                                // Don't send data tag content to the client
+                                processedChunk = "";
+                            }
+                        }
+
+                        // Remove [/format] if present
+                        processedChunk = processedChunk.Replace("[/format]", "");
+
+                        // Add to the full response
+                        responseBuilder.Append(chunk);
+
+                        // Only send the chunk if it has content after processing
+                        if (!string.IsNullOrEmpty(processedChunk))
+                        {
+                            await onChunkReceived(processedChunk);
+                        }
+                    },
+                    cancellationToken
+                );
+
+                // Process the complete response for special formatting
+                string fullResponse = responseBuilder.ToString();
+
+                // If this was a contact query and no format tag was detected, add it
+                if (isContactQuery && format == "text" && !fullResponse.Contains("[format:contact]"))
+                {
+                    fullResponse = EnhanceContactResponse(fullResponse);
+                }
+
+                return fullResponse;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error streaming message with GeminiService");
+
+                // Return an error message
+                await onChunkReceived("I'm sorry, I encountered a technical issue and couldn't process your request. Please try again later.");
+                return "Error processing request";
+            }
         }
 
+        private bool IsContactQuery(string message)
+        {
+            // Simple pattern matching for contact-related queries
+            string lowerMessage = message.ToLower();
+            return lowerMessage.Contains("contact") ||
+                   lowerMessage.Contains("email") ||
+                   lowerMessage.Contains("reach") ||
+                   lowerMessage.Contains("message you") ||
+                   lowerMessage.Contains("get in touch") ||
+                   lowerMessage.Contains("connect with you");
+        }
+
+        private string EnhanceContactResponse(string response)
+        {
+            try
+            {
+                // Create a contact form data object
+                var contactData = new
+                {
+                    title = "Contact Form",
+                    recipientName = "Razvan Bordinc",
+                    recipientPosition = "Software Engineer",
+                    emailSubject = "Portfolio Contact",
+                    socialLinks = new[]
+                    {
+                        new
+                        {
+                            platform = "LinkedIn",
+                            url = "https://linkedin.com/in/valentin-r%C4%83zvan-bord%C3%AEnc-30686a298/",
+                            icon = "linkedin"
+                        },
+                        new
+                        {
+                            platform = "GitHub",
+                            url = "https://github.com/RazvanBordinc",
+                            icon = "github"
+                        }
+                    }
+                };
+
+                // Serialize to JSON without indentation to avoid formatting issues
+                string jsonData = JsonSerializer.Serialize(contactData, _jsonOptions);
+
+                // Log the JSON for debugging
+                _logger.LogDebug($"Generated contact form JSON: {jsonData}");
+
+                // Format the contact response
+                return $"{response}\n\nYou can contact me using the form below:\n\n[format:contact][data:{jsonData}][/format]";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error generating contact form JSON");
+                return response;
+            }
+        }
+
+        private string BuildPrompt(string message, string conversationHistory, string style)
+        {
+            var promptBuilder = new StringBuilder();
+
+            // Add system instructions
+            promptBuilder.AppendLine("You are an AI chatbot representing Razvan Bordinc, a software engineer. Use the information in the portfolio data to answer questions accurately about Razvan's skills, projects, and experience. If you don't know something, be honest and don't make up information.");
+
+            // Add style instructions based on the specified style
+            promptBuilder.AppendLine(GetStyleInstruction(style));
+
+            // Add conversation history for context if available
+            if (!string.IsNullOrWhiteSpace(conversationHistory))
+            {
+                promptBuilder.AppendLine("\nConversation history:");
+                promptBuilder.AppendLine(conversationHistory);
+            }
+
+            // Add the current message
+            promptBuilder.AppendLine("\nCurrent message:");
+            promptBuilder.AppendLine(message);
+
+            // Add instructions for contact form responses if needed
+            bool isContactQuery = IsContactQuery(message);
+            if (isContactQuery)
+            {
+                promptBuilder.AppendLine("\nThis is a contact-related query. Please provide my contact information.");
+            }
+
+            return promptBuilder.ToString();
+        }
+
+        private string GetStyleInstruction(string style)
+        {
+            return style.ToUpper() switch
+            {
+                "FORMAL" => "Respond in a formal, professional tone. Use proper grammar and avoid contractions or colloquialisms. Structure your responses clearly with proper paragraphs.",
+
+                "EXPLANATORY" => "Respond in a teaching style that explains concepts thoroughly. Use examples where appropriate and break down complex ideas into simpler components. Number your points when listing multiple items.",
+
+                "MINIMALIST" => "Respond with brevity. Keep answers concise and to the point. Avoid unnecessary elaboration and focus on delivering essential information only.",
+
+                "HR" => "Respond in a warm, professional tone suitable for HR or recruitment conversations. Emphasize professional achievements, soft skills, and culture fit aspects.",
+
+                _ => "Respond in a balanced, conversational tone. Be helpful, clear, and friendly."
+            };
+        }
 
         private async Task<string> CallGeminiApiAsync(string promptText)
         {
             try
             {
+                // Construct the API endpoint URL with the API key
+                string apiUrl = $"v1beta/models/{_modelName}:generateContent?key={_apiKey}";
+
+                // Prepare the request payload
                 var requestData = new
                 {
                     contents = new[]
@@ -139,10 +323,7 @@ namespace Portfolio_server.Services
                             role = "user",
                             parts = new[]
                             {
-                                new
-                                {
-                                    text = promptText
-                                }
+                                new { text = promptText }
                             }
                         }
                     },
@@ -151,249 +332,265 @@ namespace Portfolio_server.Services
                         temperature = 0.7,
                         topK = 40,
                         topP = 0.95,
-                        maxOutputTokens = 2048,
-                        stopSequences = new string[] { }
+                        maxOutputTokens = 8192,
+                        stopSequences = Array.Empty<string>()
                     },
                     safetySettings = new[]
                     {
-                        new
-                        {
-                            category = "HARM_CATEGORY_DANGEROUS_CONTENT",
-                            threshold = "BLOCK_MEDIUM_AND_ABOVE"
-                        },
-                        new
-                        {
-                            category = "HARM_CATEGORY_HATE_SPEECH",
-                            threshold = "BLOCK_MEDIUM_AND_ABOVE"
-                        },
-                        new
-                        {
-                            category = "HARM_CATEGORY_HARASSMENT",
-                            threshold = "BLOCK_MEDIUM_AND_ABOVE"
-                        },
-                        new
-                        {
-                            category = "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                            threshold = "BLOCK_MEDIUM_AND_ABOVE"
-                        }
+                        new { category = "HARM_CATEGORY_HARASSMENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                        new { category = "HARM_CATEGORY_HATE_SPEECH", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                        new { category = "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                        new { category = "HARM_CATEGORY_DANGEROUS_CONTENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" }
                     }
                 };
 
-                var content = new StringContent(
-                    JsonSerializer.Serialize(requestData),
-                    Encoding.UTF8,
-                    "application/json");
+                // Serialize to JSON
+                string jsonContent = JsonSerializer.Serialize(requestData, _jsonOptions);
+                var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
-                // Make the API call (with API key as query parameter)
-                var response = await _httpClient.PostAsync(
-                    $"v1beta/models/{_modelName}:generateContent?key={_apiKey}",
-                    content);
+                // Send the request
+                var response = await _httpClient.PostAsync(apiUrl, content);
 
+                // Ensure successful response
                 response.EnsureSuccessStatusCode();
 
-                var responseString = await response.Content.ReadAsStringAsync();
-                var responseJson = JsonDocument.Parse(responseString);
+                // Parse the response
+                string responseJson = await response.Content.ReadAsStringAsync();
+                var responseObj = JsonSerializer.Deserialize<JsonNode>(responseJson);
 
-                // Extract the response text
-                var candidatesElement = responseJson.RootElement.GetProperty("candidates");
-                if (candidatesElement.GetArrayLength() > 0)
-                {
-                    var contentElement = candidatesElement[0].GetProperty("content");
-                    var partsElement = contentElement.GetProperty("parts");
-                    if (partsElement.GetArrayLength() > 0)
-                    {
-                        return partsElement[0].GetProperty("text").GetString();
-                    }
-                }
+                // Extract the text content from the response
+                string textContent = responseObj?["candidates"]?[0]?["content"]?["parts"]?[0]?["text"]?.GetValue<string>() ??
+                    throw new InvalidOperationException("Failed to extract text content from Gemini API response");
 
-                _logger.LogWarning("Unexpected response format from Gemini API");
-                return "I'm sorry, I couldn't generate a response at this time.";
+                return textContent;
             }
             catch (HttpRequestException ex)
             {
                 _logger.LogError(ex, "HTTP error calling Gemini API");
-
-                if (ex.StatusCode != null)
-                {
-                    return ex.StatusCode switch
-                    {
-                        System.Net.HttpStatusCode.Unauthorized => "I'm sorry, the AI service cannot process your request due to an invalid API key.",
-                        System.Net.HttpStatusCode.Forbidden => "I'm sorry, this API key doesn't have permission to use the requested model.",
-                        System.Net.HttpStatusCode.TooManyRequests => "I'm sorry, the API usage quota has been exceeded. Please try again later.",
-                        System.Net.HttpStatusCode.NotFound => $"I'm sorry, the specified model '{_modelName}' was not found.",
-                        _ => "I'm sorry, I encountered a technical issue while processing your request."
-                    };
-                }
-
-                return "I'm sorry, I couldn't connect to the AI service at this time.";
+                throw;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error calling Gemini API");
-                return "I'm sorry, I encountered an error processing your request.";
+                throw;
             }
         }
 
-        private ProcessedResponse ProcessGeminiResponse(string response)
+        private async Task StreamGeminiApiAsync(
+            string promptText,
+            Func<string, Task> onChunkReceived,
+            CancellationToken cancellationToken)
         {
-            var processedResponse = new ProcessedResponse
-            {
-                Text = response,
-                Format = "text" // Default format
-            };
-
-            if (string.IsNullOrEmpty(response))
-            {
-                _logger.LogWarning("Received empty response from Gemini API");
-                processedResponse.Text = "I'm sorry, I couldn't generate a response at this time. Please try again later.";
-                return processedResponse;
-            }
-
             try
             {
-                // Look for format tag: [format:type]
-                var formatRegex = new Regex(@"\[format:(text|contact)\]", RegexOptions.IgnoreCase);
-                var match = formatRegex.Match(response);
+                // Construct the API endpoint URL with the API key and stream=true
+                string apiUrl = $"v1beta/models/{_modelName}:streamGenerateContent?key={_apiKey}";
 
-                if (match.Success)
+                // Prepare the request payload - similar to non-streaming but with stream=true
+                var requestData = new
                 {
-                    // Extract the format type
-                    processedResponse.Format = match.Groups[1].Value.ToLower();
+                    contents = new[]
+                    {
+                        new
+                        {
+                            role = "user",
+                            parts = new[]
+                            {
+                                new { text = promptText }
+                            }
+                        }
+                    },
+                    generationConfig = new
+                    {
+                        temperature = 0.7,
+                        topK = 40,
+                        topP = 0.95,
+                        maxOutputTokens = 8192,
+                        stopSequences = Array.Empty<string>()
+                    },
+                    safetySettings = new[]
+                    {
+                        new { category = "HARM_CATEGORY_HARASSMENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                        new { category = "HARM_CATEGORY_HATE_SPEECH", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                        new { category = "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                        new { category = "HARM_CATEGORY_DANGEROUS_CONTENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" }
+                    }
+                };
 
-                    // Remove the format tag from the response
-                    processedResponse.Text = formatRegex.Replace(response, "").Trim();
-                }
+                // Serialize to JSON
+                string jsonContent = JsonSerializer.Serialize(requestData, _jsonOptions);
+                var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
-                // Remove [/format] tag if present
-                processedResponse.Text = processedResponse.Text.Replace("[/format]", "").Trim();
-
-                // Look for JSON data in the response
-                var jsonDataRegex = new Regex(@"\[data:([\s\S]*?)\]", RegexOptions.Singleline);
-                var dataMatch = jsonDataRegex.Match(processedResponse.Text);
-
-                if (dataMatch.Success)
+                // Send the request
+                using var request = new HttpRequestMessage(HttpMethod.Post, apiUrl)
                 {
+                    Content = content
+                };
+
+                using var response = await _httpClient.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken);
+
+                // Ensure successful response
+                response.EnsureSuccessStatusCode();
+
+                // Process the streaming response
+                using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                using var reader = new StreamReader(stream);
+
+                string line;
+                while ((line = await reader.ReadLineAsync()) != null && !cancellationToken.IsCancellationRequested)
+                {
+                    // Skip empty lines or metadata
+                    if (string.IsNullOrWhiteSpace(line) || !line.StartsWith("{")) continue;
+
                     try
                     {
-                        string jsonData = dataMatch.Groups[1].Value.Trim();
-                        _logger.LogDebug($"Found JSON data: {jsonData.Substring(0, Math.Min(100, jsonData.Length))}...");
+                        var json = JsonSerializer.Deserialize<JsonNode>(line);
 
-
-                        // Parse the JSON data
-                        var options = new JsonSerializerOptions
+                        // Extract text from the streaming response
+                        var candidates = json?["candidates"];
+                        if (candidates != null && candidates is JsonArray candidatesArray && candidatesArray.Count > 0)
                         {
-                            PropertyNameCaseInsensitive = true,
-                            AllowTrailingCommas = true,
-                            ReadCommentHandling = JsonCommentHandling.Skip
-                        };
-
-                        processedResponse.FormatData = JsonSerializer.Deserialize<object>(jsonData, options);
-
-                        // Remove the data tag from the response text
-                        processedResponse.Text = jsonDataRegex.Replace(processedResponse.Text, "").Trim();
+                            var contentt = candidatesArray[0]?["content"];
+                            var parts = contentt?["parts"];
+                            if (parts != null && parts is JsonArray partsArray && partsArray.Count > 0)
+                            {
+                                var text = partsArray[0]?["text"]?.GetValue<string>();
+                                if (!string.IsNullOrEmpty(text))
+                                {
+                                    await onChunkReceived(text);
+                                }
+                            }
+                        }
                     }
                     catch (JsonException ex)
                     {
-                        _logger.LogWarning(ex, "Failed to parse JSON data");
-
-                        // Create fallback data
-                        processedResponse.FormatData = CreateFallbackData(processedResponse.Format);
-
-                        // Remove the problematic data tag
-                        processedResponse.Text = jsonDataRegex.Replace(processedResponse.Text, "").Trim();
-
-                        // Add a note if one doesn't already exist
-                        if (!processedResponse.Text.Contains("using default") && !processedResponse.Text.Contains("default template"))
-                        {
-                            processedResponse.Text += "\n\nNote: There was an issue with the data format. Using default data.";
-                        }
+                        _logger.LogWarning(ex, $"Error parsing JSON from streaming response: {line}");
+                        // Continue to next line, don't fail the whole response
                     }
                 }
-                else if (processedResponse.Format != "text")
-                {
-                    // If a special format is requested but no data is provided, create fallback data
-                    _logger.LogWarning($"No JSON data found for format type: {processedResponse.Format}");
-                    processedResponse.FormatData = CreateFallbackData(processedResponse.Format);
+            }
+            catch (HttpRequestException ex)
+            {
+                _logger.LogError(ex, "HTTP error streaming from Gemini API");
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogInformation("Streaming request was cancelled");
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error streaming from Gemini API");
+                throw;
+            }
+        }
 
-                    // Add a note if one doesn't already exist
-                    if (!processedResponse.Text.Contains("using default") && !processedResponse.Text.Contains("default template"))
+        private ProcessedResponse ProcessResponse(string response)
+        {
+            try
+            {
+                // Default response format
+                var processedResponse = new ProcessedResponse
+                {
+                    Text = response,
+                    Format = "text"
+                };
+
+                // Check for format tag
+                var formatRegex = new Regex(@"\[format:(\w+)\]");
+                var formatMatch = formatRegex.Match(response);
+
+                if (formatMatch.Success)
+                {
+                    processedResponse.Format = formatMatch.Groups[1].Value.ToLower();
+
+                    // Extract data if present
+                    var dataRegex = new Regex(@"\[data:(.*?)\]", RegexOptions.Singleline);
+                    var dataMatch = dataRegex.Match(response);
+
+                    if (dataMatch.Success)
                     {
-                        processedResponse.Text += "\n\nNote: No structured data was provided. Using default template.";
+                        try
+                        {
+                            string jsonData = dataMatch.Groups[1].Value;
+                            _logger.LogDebug($"Extracted JSON data: {jsonData}");
+
+                            // Try to deserialize the JSON string
+                            try
+                            {
+                                var data = JsonSerializer.Deserialize<object>(jsonData, _jsonOptions);
+                                processedResponse.FormatData = data;
+                            }
+                            catch (JsonException jsonEx)
+                            {
+                                _logger.LogWarning(jsonEx, "JSON parsing failed, attempting to clean JSON string");
+
+                                // Attempt to clean the JSON string
+                                jsonData = CleanJsonString(jsonData);
+
+                                // Try parsing again with cleaned JSON
+                                var data = JsonSerializer.Deserialize<object>(jsonData, _jsonOptions);
+                                processedResponse.FormatData = data;
+
+                                _logger.LogInformation("Successfully parsed JSON after cleaning");
+                            }
+
+                            // Remove the data from the text
+                            response = dataRegex.Replace(response, "");
+                        }
+                        catch (JsonException ex)
+                        {
+                            _logger.LogWarning(ex, "Error parsing JSON data from response even after cleaning");
+                        }
                     }
+
+                    // Remove format tags
+                    response = formatRegex.Replace(response, "");
+                    response = Regex.Replace(response, @"\[\/format\]", "");
+                    processedResponse.Text = response.Trim();
                 }
 
                 return processedResponse;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing Gemini response");
-                return new ProcessedResponse
-                {
-                    Text = "I encountered an error processing the response. " + response,
-                    Format = "text"
-                };
+                _logger.LogError(ex, "Error processing Gemini API response");
+                return new ProcessedResponse { Text = response, Format = "text" };
             }
         }
 
- 
-
-        private string CreateFallbackDataJson(string formatType)
+        private string CleanJsonString(string jsonStr)
         {
-            string fallbackJson = "{}";
+            if (string.IsNullOrEmpty(jsonStr))
+                return jsonStr;
 
-            switch (formatType.ToLower())
-            {
+            // Remove any potential trailing characters that might break JSON
+            jsonStr = Regex.Replace(jsonStr, @"\s*\]\s*\}\s*$", "]}");
 
-                case "contact":
-                    fallbackJson = "{\"title\":\"Contact Form\",\"recipientName\":\"Portfolio Owner\",\"recipientPosition\":\"Full Stack Developer\",\"emailSubject\":\"Contact from Portfolio Website\",\"socialLinks\":[{\"platform\":\"LinkedIn\",\"url\":\"#\",\"icon\":\"linkedin\"}]}";
-                    break;
-            }
+            // Replace unescaped newlines inside strings
+            jsonStr = Regex.Replace(jsonStr, @"(?<!\\)(""|')([^""]*?)(?<!\\)\n([^""]*?)(?<!\\)(""|')", "$1$2 $3$4");
 
-            return fallbackJson;
-        }
+            // Replace JavaScript-style property names (without quotes) with JSON-style (with quotes)
+            jsonStr = Regex.Replace(jsonStr, @"([{,])\s*([a-zA-Z0-9_$]+)\s*:", "$1\"$2\":");
 
-        private object CreateFallbackData(string formatType)
-        {
-            switch (formatType.ToLower())
-            {
- 
+            // Replace single quotes with double quotes (handling escaped quotes)
+            jsonStr = jsonStr
+                .Replace("\\'", "\\TEMP_QUOTE")  // Temporarily replace escaped single quotes
+                .Replace("'", "\"")              // Replace all single quotes with double quotes
+                .Replace("\\TEMP_QUOTE", "\\'"); // Restore escaped single quotes
 
-                case "contact":
-                    return new
-                    {
-                        title = "Contact Form",
-                        recipientName = "Portfolio Owner",
-                        recipientPosition = "Full Stack Developer",
-                        emailSubject = "Contact from Portfolio Website",
-                        socialLinks = new[]
-                        {
-                            new { platform = "LinkedIn", url = "#", icon = "linkedin" }
-                        }
-                    };
+            // Remove trailing commas in objects and arrays
+            jsonStr = Regex.Replace(jsonStr, @",\s*}", "}");
+            jsonStr = Regex.Replace(jsonStr, @",\s*\]", "]");
 
-                default:
-                    return null;
-            }
-        }
+            // Fix unescaped control characters
+            jsonStr = Regex.Replace(jsonStr, @"[\x00-\x1F]", " ");
 
-        private string GetStyleInstructions(string style)
-        {
-            var styleInstructions = new Dictionary<string, string>
-            {
-                ["NORMAL"] = "Use a friendly, conversational tone with a balanced amount of detail. Be professional but approachable. Use everyday language that's easy to understand. Structure your responses in a clear, logical way with paragraphs for different points. Also respond in the language he talks to you in.",
-
-                ["FORMAL"] = "Use a professional, academic tone with precise language and terminology. Maintain a respectful distance with minimal use of contractions or colloquialisms. Structure your responses with clear introductions, well-defined sections, and formal conclusions. Use industry-standard terminology when appropriate. Also respond in the language he talks to you in.",
-
-                ["EXPLANATORY"] = "Focus on education and clarity. Break down complex concepts into manageable parts. Use analogies, examples, and step-by-step explanations. Define any technical terms you use. Structure your response with headings, numbered lists for sequences, and bullet points for key takeaways. Also respond in the language he talks to you in.",
-
-                ["MINIMALIST"] = "Be concise and direct. Prioritize brevity over comprehensiveness. Use short sentences and paragraphs. Avoid unnecessary elaboration. Focus only on the most essential information. Use bullet points when appropriate. Eliminate redundancy. Also respond in the language he talks to you in.",
-
-                ["HR"] = "Use a professional yet empathetic tone suitable for human resources communications. Be clear and specific about qualifications, skills, and experience. Balance professionalism with approachability. Use industry-standard HR terminology. Maintain a positive, encouraging tone while being realistic and honest. Also respond in the language he talks to you in."
-            };
-
-            return styleInstructions.TryGetValue(style, out var instructions)
-                ? instructions
-                : styleInstructions["NORMAL"];
+            return jsonStr;
         }
     }
 }
