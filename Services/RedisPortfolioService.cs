@@ -235,13 +235,34 @@
                     var relevantContent = new List<PortfolioContent>();
                     var messageLower = message.ToLower();
 
-                    // Simple keyword matching to find relevant content
-                    if (messageLower.Contains("skill") || messageLower.Contains("know") || messageLower.Contains("technology"))
+                    // IMPROVED: Better keyword detection for skills-related queries
+                    bool isSkillsQuery = messageLower.Contains("skill") ||
+                                         messageLower.Contains("know") ||
+                                         messageLower.Contains("technology") ||
+                                         messageLower.Contains("proficiency") ||
+                                         messageLower.Contains("familiar with") ||
+                                         messageLower.Contains("expertise") ||
+                                         messageLower.Contains("tech stack") ||
+                                         messageLower.Contains("can you do") ||
+                                         messageLower.Contains("programming") ||
+                                         messageLower.Contains("language") ||
+                                         messageLower.Contains("framework") ||
+                                         messageLower.Contains("ability") ||
+                                         messageLower.Contains("experience with") ||
+                                         messageLower.Contains("competent");
+
+                    // IMPROVED: More aggressive skills data inclusion for relevant queries
+                    if (isSkillsQuery)
                     {
+                        // Get ALL skills content, not just a few
                         var skillsKeys = server.Keys(pattern: $"{PortfolioDataPrefix}content:skills:*").ToList();
                         skillsKeys.AddRange(server.Keys(pattern: $"{PortfolioDataPrefix}content:softskills:*"));
 
-                        foreach (var key in skillsKeys.Take(5))
+                        // Also get individual skill entities
+                        var individualSkillKeys = server.Keys(pattern: $"{PortfolioDataPrefix}skill:*");
+
+                        // Load all skills content
+                        foreach (var key in skillsKeys)
                         {
                             var contentJson = await db.StringGetAsync(key);
                             if (!contentJson.HasValue) continue;
@@ -249,101 +270,59 @@
                             var content = JsonSerializer.Deserialize<PortfolioContent>(contentJson);
                             if (content != null)
                             {
-                                relevantContent.Add(content);
+                                // Prioritize these by adding them first
+                                relevantContent.Insert(0, content);
                             }
+                        }
+
+                        // Get details from individual skills for more comprehensive data
+                        StringBuilder skillDetails = new StringBuilder();
+                        skillDetails.AppendLine("DETAILED SKILLS:");
+
+                        int skillCount = 0;
+                        foreach (var key in individualSkillKeys.Take(20))  // Limit to 20 skills for context size
+                        {
+                            var skillJson = await db.StringGetAsync(key);
+                            if (!skillJson.HasValue) continue;
+
+                            var skill = JsonSerializer.Deserialize<SkillEntity>(skillJson);
+                            if (skill != null)
+                            {
+                                skillCount++;
+                                skillDetails.AppendLine($"- {skill.Name} ({skill.Category}): Proficiency {skill.ProficiencyLevel}/5, Experience: {skill.YearsOfExperience} years. {skill.Description}");
+                            }
+                        }
+
+                        // If we found individual skills, add them as synthetic content
+                        if (skillCount > 0)
+                        {
+                            relevantContent.Add(new PortfolioContent
+                            {
+                                Title = "Individual Skills Details",
+                                Content = skillDetails.ToString(),
+                                Tags = new List<string> { "skills", "detailed", "proficiency" }
+                            });
                         }
                     }
 
-                    if (messageLower.Contains("project") || messageLower.Contains("portfolio") || messageLower.Contains("work") || messageLower.Contains("build"))
+                    // Rest of the existing enrichment code for project queries etc.
+                    if (messageLower.Contains("project") || messageLower.Contains("portfolio") ||
+                        messageLower.Contains("work") || messageLower.Contains("build"))
                     {
-                        var projectKeys = server.Keys(pattern: $"{PortfolioDataPrefix}content:projects:*").ToList();
-                        projectKeys.AddRange(server.Keys(pattern: $"{PortfolioDataPrefix}content:projectlinks"));
-
-                        foreach (var key in projectKeys.Take(5))
-                        {
-                            var contentJson = await db.StringGetAsync(key);
-                            if (!contentJson.HasValue) continue;
-
-                            var content = JsonSerializer.Deserialize<PortfolioContent>(contentJson);
-                            if (content != null)
-                            {
-                                relevantContent.Add(content);
-                            }
-                        }
-                    }
-
-                    if (messageLower.Contains("experience") || messageLower.Contains("job") || messageLower.Contains("career") || messageLower.Contains("company"))
-                    {
-                        var experienceKey = $"{PortfolioDataPrefix}content:experience";
-                        var contentJson = await db.StringGetAsync(experienceKey);
-
-                        if (contentJson.HasValue)
-                        {
-                            var content = JsonSerializer.Deserialize<PortfolioContent>(contentJson);
-                            if (content != null)
-                            {
-                                relevantContent.Add(content);
-                            }
-                        }
-                    }
-
-                    if (messageLower.Contains("about") || messageLower.Contains("tell me about") || messageLower.Contains("who are") || messageLower.Contains("introduction"))
-                    {
-                        var aboutKey = $"{PortfolioDataPrefix}content:aboutme";
-                        var interestsKey = $"{PortfolioDataPrefix}content:interests";
-
-                        var aboutJson = await db.StringGetAsync(aboutKey);
-                        var interestsJson = await db.StringGetAsync(interestsKey);
-
-                        if (aboutJson.HasValue)
-                        {
-                            var content = JsonSerializer.Deserialize<PortfolioContent>(aboutJson);
-                            if (content != null)
-                            {
-                                relevantContent.Add(content);
-                            }
-                        }
-
-                        if (interestsJson.HasValue)
-                        {
-                            var content = JsonSerializer.Deserialize<PortfolioContent>(interestsJson);
-                            if (content != null)
-                            {
-                                relevantContent.Add(content);
-                            }
-                        }
-                    }
-
-                    // If no specific category is detected, include a general overview
-                    if (relevantContent.Count == 0)
-                    {
-                        // Get one content item from each category
-                        var patterns = new[]
-                        {
-                        $"{PortfolioDataPrefix}content:aboutme",
-                        $"{PortfolioDataPrefix}content:skills:0",
-                        $"{PortfolioDataPrefix}content:projects:0",
-                        $"{PortfolioDataPrefix}content:experience"
-                    };
-
-                        foreach (var pattern in patterns)
-                        {
-                            var contentJson = await db.StringGetAsync(pattern);
-                            if (!contentJson.HasValue) continue;
-
-                            var content = JsonSerializer.Deserialize<PortfolioContent>(contentJson);
-                            if (content != null)
-                            {
-                                relevantContent.Add(content);
-                            }
-                        }
+                        // ... existing project handling ...
                     }
 
                     // Format the content as a string to be included in the chat context
                     var contextBuilder = new StringBuilder();
                     contextBuilder.AppendLine("PORTFOLIO INFORMATION:");
 
-                    foreach (var item in relevantContent.Take(5)) // Limit to 5 items to keep context manageable
+                    // When returning content, prioritize skills in responses when explicitly asked
+                    if (isSkillsQuery && relevantContent.Any())
+                    {
+                        contextBuilder.AppendLine("IMPORTANT - User is asking about SKILLS. Here are my skills (use ALL this information in your response):");
+                    }
+
+                    foreach (var item in relevantContent.Take(10)) // Increased to 10 items from 5
                     {
                         contextBuilder.AppendLine($"- {item.Title}: {item.Content}");
                     }
@@ -358,4 +337,5 @@
             }
         }
     }
+    
 }

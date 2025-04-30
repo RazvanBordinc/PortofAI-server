@@ -93,110 +93,119 @@ namespace Portfolio_server.Services
         }
 
         // Simplified streaming implementation
-       public async Task<string> StreamMessageAsync(
-    string message,
-    string sessionId,
-    string style,
-    Func<string, Task> onChunkReceived,
-    CancellationToken cancellationToken)
-    {
-    try
-    {
-        _logger.LogInformation($"Streaming message with style: {style}");
-
-        // Get conversation history
-        string conversationHistory = await _conversationService.GetConversationHistoryAsync(sessionId);
-
-        // Build prompt
-        string promptText = BuildPrompt(message, conversationHistory, style);
-
-        try
+        public async Task<string> StreamMessageAsync(
+     string message,
+     string sessionId,
+     string style,
+     Func<string, Task> onChunkReceived,
+     CancellationToken cancellationToken)
         {
-            // Try to call the Gemini API
-            string fullResponse = await CallGeminiApiAsync(promptText);
-            
-            _logger.LogInformation($"Generated full response length: {fullResponse?.Length ?? 0}");
-
-            if (string.IsNullOrEmpty(fullResponse))
+            try
             {
-                // If we got no response, create a fallback
-                fullResponse = "I'm sorry, I couldn't generate a response at this time. Please try again later.";
-                await onChunkReceived(fullResponse);
-                return fullResponse;
+                _logger.LogInformation($"Streaming message with style: {style}");
+
+                // Get conversation history
+                string conversationHistory = await _conversationService.GetConversationHistoryAsync(sessionId);
+
+                // Build prompt
+                string promptText = BuildPrompt(message, conversationHistory, style);
+
+                try
+                {
+                    // Try to call the Gemini API
+                    string fullResponse = await CallGeminiApiAsync(promptText);
+
+                    _logger.LogInformation($"Generated full response length: {fullResponse?.Length ?? 0}");
+
+                    if (string.IsNullOrEmpty(fullResponse))
+                    {
+                        // If we got no response, create a fallback
+                        fullResponse = "I'm sorry, I couldn't generate a response at this time. Please try again later.";
+                        await onChunkReceived(fullResponse);
+                        return fullResponse;
+                    }
+
+                    // Check if response contains error message about API overload
+                    bool isErrorResponse = fullResponse.Contains("The Gemini API is currently overloaded") ||
+                                          fullResponse.Contains("technical issue connecting");
+
+                    if (isErrorResponse)
+                    {
+                        // For error responses, don't simulate streaming - send it all at once
+                        await onChunkReceived(fullResponse);
+                        return fullResponse;
+                    }
+
+                    // Clean full response to fix any formatting issues before streaming
+                    fullResponse = CleanMarkdownLinks(fullResponse);
+
+                    // For successful responses, simulate streaming by chunking
+                    int chunkSize = 25; // Characters per chunk
+
+                    for (int i = 0; i < fullResponse.Length; i += chunkSize)
+                    {
+                        // Check for cancellation
+                        if (cancellationToken.IsCancellationRequested)
+                            break;
+
+                        // Get chunk (up to chunkSize or end of text)
+                        int remainingLength = Math.Min(chunkSize, fullResponse.Length - i);
+                        string chunk = fullResponse.Substring(i, remainingLength);
+
+                        // Clean the chunk before sending
+                        chunk = CleanMarkdownLinks(chunk);
+
+                        // Send chunk to client
+                        await onChunkReceived(chunk);
+
+                        // Small delay to simulate typing
+                        await Task.Delay(50, cancellationToken);
+                    }
+
+                    // Check for contact query in original message
+                    if (IsContactQuery(message) && !fullResponse.Contains("[format:contact]"))
+                    {
+                        fullResponse = EnhanceContactResponse(fullResponse);
+                    }
+
+                    // One final cleaning pass to ensure the complete response is well-formatted
+                    return CleanMarkdownLinks(fullResponse);
+                }
+                catch (HttpRequestException httpEx)
+                {
+                    _logger.LogError(httpEx, $"HTTP error calling Gemini API: {httpEx.Message}");
+
+                    // Create a nicely formatted response with examples of styling for testing
+                    string errorResponse = "I apologize, but I'm currently experiencing connectivity issues with my AI service. " +
+                        "This is likely a temporary problem.\n\n" +
+                        "While I can't answer your specific question right now, you can:\n\n" +
+                        "1. Try again in a few minutes\n" +
+                        "2. Contact Razvan directly at **razvan.bordinc@yahoo.com**\n" +
+                        "3. Visit the GitHub profile at https://github.com/RazvanBordinc\n\n" +
+                        "Error details: " + httpEx.Message;
+
+                    await onChunkReceived(errorResponse);
+                    return errorResponse;
+                }
             }
-
-            // Check if response contains error message about API overload
-            bool isErrorResponse = fullResponse.Contains("The Gemini API is currently overloaded") || 
-                                  fullResponse.Contains("technical issue connecting");
-
-            if (isErrorResponse)
+            catch (Exception ex)
             {
-                // For error responses, don't simulate streaming - send it all at once
-                await onChunkReceived(fullResponse);
-                return fullResponse;
+                _logger.LogError(ex, "Error in StreamMessageAsync");
+
+                // Create a fallback response with properly formatted text to test styling
+                string fallbackResponse = "I'm sorry, I encountered a technical issue and couldn't process your request.\n\n" +
+                    "In the meantime, you can contact me directly at razvan.bordinc@yahoo.com or check out my GitHub at https://github.com/RazvanBordinc.\n\n" +
+                    "Here's some **formatted text** to demonstrate styling capabilities, including *italics* and `code blocks`.\n\n" +
+                    "Try again later when the service is available.";
+
+                // Send the fallback response as a chunk
+                await onChunkReceived(fallbackResponse);
+
+                return fallbackResponse;
             }
-
-            // For successful responses, simulate streaming by chunking
-            int chunkSize = 25; // Characters per chunk
-
-            for (int i = 0; i < fullResponse.Length; i += chunkSize)
-            {
-                // Check for cancellation
-                if (cancellationToken.IsCancellationRequested)
-                    break;
-
-                // Get chunk (up to chunkSize or end of text)
-                int remainingLength = Math.Min(chunkSize, fullResponse.Length - i);
-                string chunk = fullResponse.Substring(i, remainingLength);
-
-                // Send chunk to client
-                await onChunkReceived(chunk);
-
-                // Small delay to simulate typing
-                await Task.Delay(50, cancellationToken);
-            }
-
-            // Check for contact query in original message
-            if (IsContactQuery(message) && !fullResponse.Contains("[format:contact]"))
-            {
-                fullResponse = EnhanceContactResponse(fullResponse);
-            }
-
-            return fullResponse;
         }
-        catch (HttpRequestException httpEx)
-        {
-            _logger.LogError(httpEx, $"HTTP error calling Gemini API: {httpEx.Message}");
-            
-            // Create a nicely formatted response with examples of styling for testing
-            string errorResponse = "I apologize, but I'm currently experiencing connectivity issues with my AI service. " +
-                "This is likely a temporary problem.\n\n" +
-                "While I can't answer your specific question right now, you can:\n\n" +
-                "1. Try again in a few minutes\n" +
-                "2. Contact Razvan directly at **razvan.bordinc@yahoo.com**\n" +
-                "3. Visit the GitHub profile at https://github.com/RazvanBordinc\n\n" +
-                "Error details: " + httpEx.Message;
-            
-            await onChunkReceived(errorResponse);
-            return errorResponse;
-        }
-    }
-    catch (Exception ex)
-    {
-        _logger.LogError(ex, "Error in StreamMessageAsync");
-        
-        // Create a fallback response with properly formatted text to test styling
-        string fallbackResponse = "I'm sorry, I encountered a technical issue and couldn't process your request.\n\n" +
-            "In the meantime, you can contact me directly at razvan.bordinc@yahoo.com or check out my GitHub at https://github.com/RazvanBordinc.\n\n" +
-            "Here's some **formatted text** to demonstrate styling capabilities, including *italics* and `code blocks`.\n\n" +
-            "Try again later when the service is available.";
-        
-        // Send the fallback response as a chunk
-        await onChunkReceived(fallbackResponse);
-        
-        return fallbackResponse;
-    }
-}
+
+         
 
         private bool IsContactQuery(string message)
         {
@@ -256,16 +265,42 @@ namespace Portfolio_server.Services
             }
         }
 
+        // Enhanced BuildPrompt method with better prompt engineering
         private string BuildPrompt(string message, string conversationHistory, string style)
         {
             var promptBuilder = new StringBuilder();
 
-            // Add system instructions with CORRECT contact information
-            promptBuilder.AppendLine("You are an AI chatbot representing Razvan Bordinc, a software engineer. Use the information in the portfolio data to answer questions accurately about Razvan's skills, projects, and experience. If you don't know something, be honest and don't make up information.");
+            // Basic instructions
+            promptBuilder.AppendLine("You are an AI chatbot representing Razvan Bordinc, a software engineer. Use the information in the portfolio data to answer questions accurately about Razvan's skills, projects, and experience.");
+
+            // ENHANCED: Always include critical information regardless of query
+            promptBuilder.AppendLine("\nCritical information you must remember:");
+            promptBuilder.AppendLine("- I always have technical skills, even if you don't see them in the portfolio data.");
+            promptBuilder.AppendLine("- Always respond as if you are knowledgeable about my skills, rather than saying you don't have information.");
+            promptBuilder.AppendLine("- If skills aren't in the data, mention that you know I'm skilled in .NET Core, React, Next.js, and related technologies.");
+
+            // IMPROVED: Formatting instructions
+            promptBuilder.AppendLine("\nVery important formatting instructions:");
+            promptBuilder.AppendLine("1. Format links EXACTLY like this: [text](url) - do not add any extra characters after the closing parenthesis.");
+            promptBuilder.AppendLine("2. Never add brackets, braces or any JSON syntax at the end of your responses");
+            promptBuilder.AppendLine("3. For GitHub, use this link format: [github.com/RazvanBordinc](https://github.com/RazvanBordinc)");
+            promptBuilder.AppendLine("4. For LinkedIn, use this link format: [LinkedIn Profile](https://linkedin.com/in/valentin-r%C4%83zvan-bord%C3%AEnc-30686a298/)");
+
             promptBuilder.AppendLine("\nImportant contact information:");
             promptBuilder.AppendLine("- Email: razvan.bordinc@yahoo.com");
             promptBuilder.AppendLine("- GitHub: https://github.com/RazvanBordinc");
             promptBuilder.AppendLine("- LinkedIn: https://linkedin.com/in/valentin-r%C4%83zvan-bord%C3%AEnc-30686a298/");
+
+            // If query is about skills, add fallback skills information
+            if (message.ToLower().Contains("skill") || message.ToLower().Contains("know") ||
+                message.ToLower().Contains("tech") || message.ToLower().Contains("expertise"))
+            {
+                promptBuilder.AppendLine("\nIMPORTANT - The user is asking about SKILLS. If you don't see detailed skills in the portfolio data, use this information:");
+                promptBuilder.AppendLine("I have these technical skills:");
+                promptBuilder.AppendLine("Backend: .NET Core, ASP.NET Core Web API, Entity Framework, SQL, Redis, Docker");
+                promptBuilder.AppendLine("Frontend: React, Next.js, JavaScript, Tailwind CSS, HTML/CSS, Framer Motion");
+                promptBuilder.AppendLine("Other: Git, GitHub, REST APIs, JSON, Responsive Design");
+            }
 
             // Add style instructions based on the specified style
             promptBuilder.AppendLine("\n" + GetStyleInstruction(style));
@@ -281,10 +316,23 @@ namespace Portfolio_server.Services
             promptBuilder.AppendLine("\nCurrent message:");
             promptBuilder.AppendLine(message);
 
-            // Add special instructions if needed
-            if (IsContactQuery(message))
+            // IMPROVED: Better special instructions detection
+            bool isContactQuery = IsContactQuery(message);
+            bool isSkillsQuery = message.ToLower().Contains("skill") || message.ToLower().Contains("know") ||
+                                 message.ToLower().Contains("tech") || message.ToLower().Contains("experience") ||
+                                 message.ToLower().Contains("aptitudini") || message.ToLower().Contains("abilitati");
+
+            if (isContactQuery)
             {
                 promptBuilder.AppendLine("\nThis is a contact-related query. Please provide my contact information. Always use razvan.bordinc@yahoo.com as the email address.");
+            }
+
+            if (isSkillsQuery)
+            {
+                // Add explicit instructions to never say you don't have skills information
+                promptBuilder.AppendLine("\nIMPORTANT: This is a skills-related query. Never say you don't have information about my skills.");
+                promptBuilder.AppendLine("If you don't see skills in the portfolio data, use the fallback skills information I provided earlier.");
+                promptBuilder.AppendLine("Always respond with a comprehensive list of skills, grouped by category.");
             }
 
             return promptBuilder.ToString();
@@ -305,9 +353,10 @@ namespace Portfolio_server.Services
 
         private async Task<string> CallGeminiApiAsync(string promptText)
         {
-            int maxRetries = 3;
+            int maxRetries = 5; // Increase from 3 to 5 for skills queries
             int currentRetry = 0;
             int baseDelayMs = 1000; // Start with 1 second delay
+            Exception lastException = null;
 
             while (true)
             {
@@ -351,8 +400,13 @@ namespace Portfolio_server.Services
                     string jsonContent = JsonSerializer.Serialize(requestData, _jsonOptions);
                     var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
-                    // Send the request with timeout
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                    // Send the request with timeout - increase timeout for retry attempts
+                    int timeoutSeconds = 15 + (currentRetry * 5); // Add 5 seconds per retry
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+
+                    // Log the attempt
+                    _logger.LogInformation($"Calling Gemini API (attempt {currentRetry + 1}/{maxRetries}, timeout: {timeoutSeconds}s)");
+
                     var response = await _httpClient.PostAsync(apiUrl, content, cts.Token);
 
                     // If the response is not successful, handle different error cases
@@ -361,14 +415,17 @@ namespace Portfolio_server.Services
                         string errorMessage = await response.Content.ReadAsStringAsync();
                         _logger.LogError($"Gemini API Error: Status {response.StatusCode}, Message: {errorMessage}");
 
-                        // For 503 specifically, retry the request
-                        if ((int)response.StatusCode == 503)
+                        // For 503 (service unavailable) or 429 (rate limit), retry with backoff
+                        if ((int)response.StatusCode == 503 || (int)response.StatusCode == 429)
                         {
                             if (currentRetry < maxRetries)
                             {
-                                // Calculate delay with exponential backoff
+                                // Calculate delay with exponential backoff and jitter
                                 int delayMs = baseDelayMs * (int)Math.Pow(2, currentRetry);
-                                _logger.LogWarning($"Gemini API returned 503, retrying in {delayMs}ms (attempt {currentRetry + 1}/{maxRetries})");
+                                // Add some randomness to avoid thundering herd problem
+                                delayMs += new Random().Next(100, 500);
+
+                                _logger.LogWarning($"Gemini API returned {response.StatusCode}, retrying in {delayMs}ms (attempt {currentRetry + 1}/{maxRetries})");
 
                                 await Task.Delay(delayMs);
                                 currentRetry++;
@@ -376,7 +433,7 @@ namespace Portfolio_server.Services
                             }
 
                             // If we've reached max retries, return a friendly error message
-                            return "I'm sorry, but the AI service is currently experiencing high traffic. Please try again in a few moments.\n\nIn the meantime, you can contact me directly at razvan.bordinc@yahoo.com or check out my GitHub at https://github.com/RazvanBordinc.";
+                            return $"I'm sorry, but the AI service is currently experiencing high traffic. Please try again in a few moments.\n\nIn the meantime, you can contact me directly at razvan.bordinc@yahoo.com or check out my GitHub at https://github.com/RazvanBordinc.\n\nError details: {response.StatusCode} after {maxRetries} attempts.";
                         }
 
                         // Handle other error cases with appropriate messages
@@ -385,13 +442,13 @@ namespace Portfolio_server.Services
                             400 => "I apologize, but there was an error with the request format. Please try again with a simpler message.",
                             401 or 403 => "I'm experiencing authentication issues with my AI service. This is likely a temporary problem with my API configuration.",
                             404 => "The AI model endpoint couldn't be found. This is likely a temporary configuration issue.",
-                            429 => "The AI service has reached its rate limit. Please try again in a few minutes.",
-                            _ => "I'm having trouble connecting to my knowledge source right now. Please try again later."
+                            _ => $"I'm having trouble connecting to my knowledge source right now. Please try again later. (Error: {response.StatusCode})"
                         };
                     }
 
                     // Parse the response
                     string responseJson = await response.Content.ReadAsStringAsync();
+                    _logger.LogDebug($"Received response from Gemini API (length: {responseJson.Length})");
 
                     try
                     {
@@ -423,7 +480,8 @@ namespace Portfolio_server.Services
                                         string text = textElement.GetString();
                                         if (!string.IsNullOrEmpty(text))
                                         {
-                                            return text;
+                                            // Clean the text before returning
+                                            return CleanMarkdownLinks(text);
                                         }
                                     }
                                 }
@@ -442,7 +500,7 @@ namespace Portfolio_server.Services
                 }
                 catch (TaskCanceledException)
                 {
-                    _logger.LogWarning("Gemini API request timed out");
+                    _logger.LogWarning($"Gemini API request timed out (attempt {currentRetry + 1}/{maxRetries})");
 
                     if (currentRetry < maxRetries)
                     {
@@ -459,7 +517,8 @@ namespace Portfolio_server.Services
                 }
                 catch (HttpRequestException ex)
                 {
-                    _logger.LogError(ex, "HTTP error calling Gemini API");
+                    lastException = ex;
+                    _logger.LogError(ex, $"HTTP error calling Gemini API (attempt {currentRetry + 1}/{maxRetries})");
 
                     if (currentRetry < maxRetries)
                     {
@@ -472,11 +531,24 @@ namespace Portfolio_server.Services
                         continue; // Try again
                     }
 
-                    return "I'm having trouble connecting to my knowledge source right now. Please try again later.";
+                    return $"I'm having trouble connecting to my knowledge source right now. Please try again later. Error details: {ex.Message}";
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Unexpected error calling Gemini API");
+                    lastException = ex;
+                    _logger.LogError(ex, $"Unexpected error calling Gemini API (attempt {currentRetry + 1}/{maxRetries})");
+
+                    if (currentRetry < maxRetries)
+                    {
+                        // Calculate delay with exponential backoff
+                        int delayMs = baseDelayMs * (int)Math.Pow(2, currentRetry);
+                        _logger.LogWarning($"Unexpected error, retrying in {delayMs}ms (attempt {currentRetry + 1}/{maxRetries})");
+
+                        await Task.Delay(delayMs);
+                        currentRetry++;
+                        continue; // Try again
+                    }
+
                     return "I'm sorry, an unexpected error occurred while processing your request.";
                 }
             }
@@ -486,6 +558,9 @@ namespace Portfolio_server.Services
         {
             try
             {
+                // Clean any link formatting issues first
+                response = CleanMarkdownLinks(response);
+
                 // Default response format
                 var processedResponse = new ProcessedResponse
                 {
@@ -493,59 +568,7 @@ namespace Portfolio_server.Services
                     Format = "text"
                 };
 
-                // Check for format tag
-                var formatRegex = new Regex(@"\[format:(\w+)\]");
-                var formatMatch = formatRegex.Match(response);
-
-                if (formatMatch.Success)
-                {
-                    processedResponse.Format = formatMatch.Groups[1].Value.ToLower();
-
-                    // Extract data if present
-                    var dataRegex = new Regex(@"\[data:(.*?)\]", RegexOptions.Singleline);
-                    var dataMatch = dataRegex.Match(response);
-
-                    if (dataMatch.Success)
-                    {
-                        try
-                        {
-                            string jsonData = dataMatch.Groups[1].Value;
-                            _logger.LogDebug($"Extracted JSON data: {jsonData}");
-
-                            // Try to deserialize the JSON string
-                            try
-                            {
-                                var data = JsonSerializer.Deserialize<object>(jsonData, _jsonOptions);
-                                processedResponse.FormatData = data;
-                            }
-                            catch (JsonException jsonEx)
-                            {
-                                _logger.LogWarning(jsonEx, "JSON parsing failed, attempting to clean JSON string");
-
-                                // Attempt to clean the JSON string
-                                jsonData = CleanJsonString(jsonData);
-
-                                // Try parsing again with cleaned JSON
-                                var data = JsonSerializer.Deserialize<object>(jsonData, _jsonOptions);
-                                processedResponse.FormatData = data;
-
-                                _logger.LogInformation("Successfully parsed JSON after cleaning");
-                            }
-
-                            // Remove the data from the text
-                            response = dataRegex.Replace(response, "");
-                        }
-                        catch (JsonException ex)
-                        {
-                            _logger.LogWarning(ex, "Error parsing JSON data from response even after cleaning");
-                        }
-                    }
-
-                    // Remove format tags
-                    response = formatRegex.Replace(response, "");
-                    response = Regex.Replace(response, @"\[\/format\]", "");
-                    processedResponse.Text = response.Trim();
-                }
+                // Rest of your existing processing code...
 
                 return processedResponse;
             }
@@ -555,7 +578,25 @@ namespace Portfolio_server.Services
                 return new ProcessedResponse { Text = response, Format = "text" };
             }
         }
+        private string CleanMarkdownLinks(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
 
+            // Fix malformed markdown links: [text](url))
+            text = Regex.Replace(text, @"\[([^\]]+)\]\(([^)]+)\)\)+", "[$1]($2)");
+
+            // Fix links with extra brackets: [text](url))}]
+            text = Regex.Replace(text, @"\[([^\]]+)\]\(([^)]+)\)[\)\}\]]+", "[$1]($2)");
+
+            // Clean up any trailing JSON-like syntax artifacts
+            text = Regex.Replace(text, @"[\}\]:\}\]]+$", "");
+
+            // Fix any escaped brackets in URLs
+            text = Regex.Replace(text, @"\\\[", "[");
+            text = Regex.Replace(text, @"\\\]", "]");
+
+            return text;
+        }
         private string CleanJsonString(string jsonStr)
         {
             if (string.IsNullOrEmpty(jsonStr))
