@@ -3,30 +3,31 @@ using Portfolio_server.Models;
 using StackExchange.Redis;
 using System.Text.Json;
 using System.Net;
-using MimeKit;
-// Using MailKit explicitly with alias to avoid ambiguity
-using MailKitSmtp = MailKit.Net.Smtp;
-using MailKit.Security;
+using SendGrid;
+using SendGrid.Helpers.Mail;
 
 namespace Portfolio_server.Services
 {
     public class EmailService : IEmailService
     {
         private readonly ILogger<EmailService> _logger;
-        private readonly SmtpOptions _smtpOptions;
+        private readonly SendGridOptions _sendGridOptions;
         private readonly IConnectionMultiplexer _redis;
+        private const int DEFAULT_EMAIL_RATE_LIMIT = 2; // Max emails per IP
 
         public EmailService(
             ILogger<EmailService> logger,
-            IOptions<SmtpOptions> smtpOptions,
+            IOptions<SendGridOptions> sendGridOptions,
             IConnectionMultiplexer redis)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-            _smtpOptions = smtpOptions?.Value ?? throw new ArgumentNullException(nameof(smtpOptions));
+            _sendGridOptions = sendGridOptions?.Value ?? throw new ArgumentNullException(nameof(sendGridOptions));
             _redis = redis;
 
-            // Log SMTP settings (without password)
-            _logger.LogInformation($"Email service initialized with: Host={_smtpOptions.Host}, Port={_smtpOptions.Port}, SSL={_smtpOptions.EnableSsl}, Username={_smtpOptions.Username}");
+            // Log SendGrid settings (without API key)
+            _logger.LogInformation($"Email service initialized with SendGrid: FromEmail={_sendGridOptions.FromEmail}, " +
+                $"ToEmail={_sendGridOptions.ToEmail}, RateLimit={_sendGridOptions.EmailRateLimit}, " +
+                $"ApiKeyConfigured={(string.IsNullOrEmpty(_sendGridOptions.ApiKey) ? "No" : "Yes")}");
         }
 
         public async Task<bool> SendContactEmailAsync(ContactRequest contactRequest)
@@ -45,6 +46,16 @@ namespace Portfolio_server.Services
                 return false;
             }
 
+            // Get client IP from context (passed in the request metadata)
+            string ipAddress = contactRequest.ClientIp ?? "unknown";
+
+            // Check email rate limit for this IP
+            if (!await CheckEmailRateLimitAsync(ipAddress))
+            {
+                _logger.LogWarning($"Email rate limit exceeded for IP: {ipAddress}");
+                return false;
+            }
+
             // Always store in Redis as backup first
             bool storedInRedis = await StoreContactInRedisAsync(contactRequest);
 
@@ -57,69 +68,73 @@ namespace Portfolio_server.Services
                 _logger.LogInformation($"Successfully stored contact request from {contactRequest.Name} in Redis");
             }
 
-            // Try sending the email with MailKit
-            bool emailSent = await SendEmailWithMailKitAsync(contactRequest);
+            // Try sending the email with SendGrid
+            bool emailSent = await SendEmailWithSendGridAsync(contactRequest);
+
+            if (emailSent)
+            {
+                // Increment email count for this IP
+                await IncrementEmailCountAsync(ipAddress);
+            }
 
             // Return true if either the email was sent OR it was stored in Redis
             return emailSent || storedInRedis;
         }
 
-        private async Task<bool> SendEmailWithMailKitAsync(ContactRequest contactRequest)
+        private async Task<bool> SendEmailWithSendGridAsync(ContactRequest contactRequest)
         {
             try
             {
-                _logger.LogInformation($"Attempting to send email with MailKit from {contactRequest.Name} via {_smtpOptions.Host}:{_smtpOptions.Port}");
-
-                // Create the email message
-                var message = new MimeMessage();
-                message.From.Add(new MailboxAddress("Portfolio Contact Form", _smtpOptions.Username));
-                message.To.Add(new MailboxAddress("Razvan Bordinc", _smtpOptions.Username));
-                message.ReplyTo.Add(new MailboxAddress(contactRequest.Name, contactRequest.Email));
-                message.Subject = $"Portfolio Contact: {contactRequest.Name}";
-
-                // Create HTML body
-                var bodyBuilder = new BodyBuilder
+                if (string.IsNullOrEmpty(_sendGridOptions.ApiKey))
                 {
-                    HtmlBody = FormatEmailBody(contactRequest)
-                };
+                    _logger.LogError("SendGrid API key is not configured. Cannot send email.");
+                    return false;
+                }
 
-                message.Body = bodyBuilder.ToMessageBody();
+                _logger.LogInformation($"Attempting to send email with SendGrid from {contactRequest.Name}");
 
-                // Send using MailKit's SmtpClient - note we're using the MailKit version explicitly
-                using (var client = new MailKitSmtp.SmtpClient())
+                var client = new SendGridClient(_sendGridOptions.ApiKey);
+                var from = new EmailAddress(_sendGridOptions.FromEmail, _sendGridOptions.FromName);
+                var to = new EmailAddress(_sendGridOptions.ToEmail, _sendGridOptions.ToName);
+                var replyTo = new EmailAddress(contactRequest.Email, contactRequest.Name);
+
+                // Set subject
+                string subject = $"Portfolio Contact: {contactRequest.Name}";
+
+                // Create HTML content
+                string htmlContent = FormatEmailBody(contactRequest);
+                string plainTextContent = $"Name: {contactRequest.Name}\nEmail: {contactRequest.Email}\nPhone: {contactRequest.Phone ?? "Not provided"}\n\nMessage:\n{contactRequest.Message}";
+
+                // Create SendGrid message
+                var msg = MailHelper.CreateSingleEmail(
+                    from,
+                    to,
+                    subject,
+                    plainTextContent,
+                    htmlContent
+                );
+
+                // Set reply-to
+                msg.SetReplyTo(replyTo);
+
+                // Send the email
+                var response = await client.SendEmailAsync(msg);
+
+                if (response.IsSuccessStatusCode)
                 {
-                    // Configure security based on port
-                    var securityOptions = SecureSocketOptions.Auto;
-                    if (_smtpOptions.Port == 465)
-                    {
-                        securityOptions = SecureSocketOptions.SslOnConnect;
-                    }
-                    else if (_smtpOptions.Port == 587)
-                    {
-                        securityOptions = SecureSocketOptions.StartTls;
-                    }
-
-                    client.Timeout = 15000; // 15 second timeout
-
-                    // Connect to SMTP server
-                    await client.ConnectAsync(_smtpOptions.Host, _smtpOptions.Port, securityOptions);
-
-                    // Authenticate
-                    await client.AuthenticateAsync(_smtpOptions.Username, _smtpOptions.Password);
-
-                    // Send the message
-                    await client.SendAsync(message);
-
-                    // Disconnect properly
-                    await client.DisconnectAsync(true);
-
-                    _logger.LogInformation($"Email sent successfully via MailKit from {contactRequest.Name} ({contactRequest.Email})");
+                    _logger.LogInformation($"Email sent successfully via SendGrid from {contactRequest.Name} ({contactRequest.Email})");
                     return true;
+                }
+                else
+                {
+                    string responseBody = await response.Body.ReadAsStringAsync();
+                    _logger.LogError($"SendGrid error: Status {response.StatusCode}, Message: {responseBody}");
+                    return false;
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"Error sending email with MailKit from {contactRequest.Name}");
+                _logger.LogError(ex, $"Error sending email with SendGrid from {contactRequest.Name}");
                 return false;
             }
         }
@@ -145,7 +160,8 @@ namespace Portfolio_server.Services
                     ["phone"] = contactRequest.Phone ?? "Not provided",
                     ["message"] = contactRequest.Message,
                     ["timestamp"] = timestamp.ToString(),
-                    ["date"] = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")
+                    ["date"] = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"),
+                    ["ip"] = contactRequest.ClientIp ?? "unknown"
                 };
 
                 // Serialize and store as string
@@ -161,6 +177,85 @@ namespace Portfolio_server.Services
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error storing contact request in Redis");
+                return false;
+            }
+        }
+
+        private async Task<bool> CheckEmailRateLimitAsync(string ipAddress)
+        {
+            try
+            {
+                if (_redis == null) return true; // If Redis is not available, allow the request
+
+                var db = _redis.GetDatabase();
+                if (db == null) return true;
+
+                var key = $"email:ratelimit:{ipAddress}";
+
+                // Check if key exists
+                if (!await db.KeyExistsAsync(key))
+                {
+                    return true; // No emails sent yet
+                }
+
+                // Get current count
+                var value = await db.StringGetAsync(key);
+                if (!value.HasValue)
+                {
+                    return true;
+                }
+
+                if (!int.TryParse(value, out int count))
+                {
+                    _logger.LogWarning($"Invalid email rate limit value in Redis for IP {ipAddress}: {value}");
+                    return true; // Allow on error
+                }
+
+                // Get limit from settings or use default
+                int limit = _sendGridOptions.EmailRateLimit > 0 ?
+                    _sendGridOptions.EmailRateLimit : DEFAULT_EMAIL_RATE_LIMIT;
+
+                bool result = count < limit;
+                _logger.LogInformation($"Email rate limit check for IP {ipAddress}: {count}/{limit} emails used, allowed = {result}");
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error checking email rate limit for IP {ipAddress}");
+                return true; // Allow the request on error
+            }
+        }
+
+        private async Task<bool> IncrementEmailCountAsync(string ipAddress)
+        {
+            try
+            {
+                if (_redis == null) return false;
+
+                var db = _redis.GetDatabase();
+                if (db == null) return false;
+
+                var key = $"email:ratelimit:{ipAddress}";
+
+                if (await db.KeyExistsAsync(key))
+                {
+                    // Increment existing counter
+                    var newValue = await db.StringIncrementAsync(key);
+                    _logger.LogInformation($"Incremented email count for IP {ipAddress} to {newValue}");
+                }
+                else
+                {
+                    // Create new counter with 24-hour TTL
+                    await db.StringSetAsync(key, 1, TimeSpan.FromHours(24));
+                    _logger.LogInformation($"Created new email count for IP {ipAddress} with TTL of 24 hours");
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error incrementing email count for IP {ipAddress}");
                 return false;
             }
         }
@@ -188,6 +283,7 @@ namespace Portfolio_server.Services
                         <div style='margin-top: 20px; font-size: 0.9em; color: #666;'>
                             <p>This message was sent from your portfolio website contact form.</p>
                             <p>Date: {DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")} UTC</p>
+                            <p>IP: {contactRequest.ClientIp ?? "unknown"}</p>
                         </div>
                     </div>
                 </body>

@@ -222,16 +222,17 @@ namespace Portfolio_server.Controllers
                 await WriteErrorResponseAsync("An error occurred while processing your request. Please try again later.", StatusCodes.Status500InternalServerError);
             }
         }
-
         [HttpPost("contact")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(object), StatusCodes.Status400BadRequest)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status429TooManyRequests)]
         [ProducesResponseType(typeof(object), StatusCodes.Status500InternalServerError)]
         public async Task<IActionResult> SubmitContactForm([FromBody] ContactRequest request)
         {
             var requestId = Guid.NewGuid().ToString("N");
             _logger.LogInformation($"[{requestId}] Contact form submission received from {request.Name} ({request.Email})");
 
+            // Validate request
             if (request == null || string.IsNullOrEmpty(request.Name) ||
                 string.IsNullOrEmpty(request.Email) || string.IsNullOrEmpty(request.Message))
             {
@@ -241,10 +242,13 @@ namespace Portfolio_server.Controllers
 
             try
             {
+                // Get client IP address and add to the request
                 var ipAddress = GetClientIpAddress();
+                request.ClientIp = ipAddress;
+
                 _logger.LogInformation($"[{requestId}] Processing contact request from {request.Name} from IP: {ipAddress}");
 
-                // Try to send the email - this now stores in Redis automatically first
+                // Try to send the email (this now also checks IP-based email rate limiting)
                 bool result = await _emailService.SendContactEmailAsync(request);
 
                 if (result)
@@ -258,13 +262,14 @@ namespace Portfolio_server.Controllers
                 }
                 else
                 {
-                    // Even if email sending failed, the message is stored in Redis, so we still return 200 OK
-                    _logger.LogWarning($"[{requestId}] Failed to send contact email from {request.Name} ({request.Email}), but saved to Redis");
-                    return Ok(new
+                    // Could fail due to rate limiting or SendGrid API issues
+                    _logger.LogWarning($"[{requestId}] Failed to send contact email from {request.Name} ({request.Email})");
+
+                    return StatusCode(429, new
                     {
-                        message = "Your message has been received. Thank you for contacting me - I'll get back to you soon!",
-                        success = true,
-                        note = "Message saved and will be processed shortly."
+                        message = "You've reached the maximum number of contact requests. Please try again later or contact me directly via email.",
+                        contactEmail = "razvan.bordinc@yahoo.com",
+                        success = false
                     });
                 }
             }
@@ -332,60 +337,7 @@ namespace Portfolio_server.Controllers
             var error = new { error = errorMessage };
             await Response.WriteAsJsonAsync(error);
         }
-        // Add this method to your MainController.cs class
-
-        [HttpGet("debug-gemini")]
-        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        [ProducesResponseType(typeof(object), StatusCodes.Status500InternalServerError)]
-        public async Task<IActionResult> DebugGemini()
-        {
-            try
-            {
-                var requestId = Guid.NewGuid().ToString("N");
-                _logger.LogInformation($"[{requestId}] Debug Gemini API request initiated");
-
-                // Get environment variables and configuration
-                var apiKey = Environment.GetEnvironmentVariable("GOOGLE_API_KEY") ?? "Not set in environment";
-                var configApiKey = HttpContext.RequestServices
-                    .GetService<IConfiguration>()
-                    .GetSection("GeminiApi")["ApiKey"] ?? "Not set in configuration";
-
-                var modelName = (_geminiService as GeminiService)?.GetModelName() ?? "Unknown";
-
-                // Try a simple test request
-                var response = await _geminiService.ProcessMessageAsync(
-                    "Give a one-word response as a test of the API connection.",
-                    "debug-session",
-                    "NORMAL");
-
-                _logger.LogInformation($"[{requestId}] Debug Gemini API request completed successfully");
-
-                return Ok(new
-                {
-                    status = "success",
-                    message = "Gemini API is working correctly",
-                    timestamp = DateTime.UtcNow,
-                    apiKeyFromEnv = $"Length: {apiKey.Length}, First chars: {(apiKey.Length > 5 ? apiKey.Substring(0, 5) + "..." : "Too short!")}",
-                    apiKeyFromConfig = $"Length: {configApiKey.Length}, First chars: {(configApiKey.Length > 5 ? configApiKey.Substring(0, 5) + "..." : "Too short!")}",
-                    modelName = modelName,
-                    response = response
-                });
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error in debug Gemini API endpoint");
-
-                return StatusCode(500, new
-                {
-                    status = "error",
-                    message = "Failed to connect to Gemini API",
-                    error = ex.GetType().Name + ": " + ex.Message,
-                    timestamp = DateTime.UtcNow,
-                    innerException = ex.InnerException?.Message,
-                    stackTrace = ex.StackTrace?.Split('\n').Take(10).ToArray() // Limited stack trace
-                });
-            }
-        }
+         
         // Health check endpoint
         [HttpGet("health")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]

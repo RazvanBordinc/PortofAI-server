@@ -188,12 +188,14 @@ namespace Portfolio_server.Models
         public bool IsHighlighted { get; set; }
         public int DisplayOrder { get; set; }
     }
+    // Update this in Models.cs
     public class ContactRequest
     {
-        public string Name { get; set; }
-        public string Email { get; set; }
-        public string Phone { get; set; }
-        public string Message { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public string Email { get; set; } = string.Empty;
+        public string? Phone { get; set; }
+        public string Message { get; set; } = string.Empty;
+        public string? ClientIp { get; set; }  
     }
     public class ProjectEntity
     {
@@ -227,5 +229,13 @@ namespace Portfolio_server.Models
         public string Username { get; set; }
         public string Password { get; set; }
     }
-
+    public class SendGridOptions
+    {
+        public string ApiKey { get; set; } = string.Empty;
+        public string FromEmail { get; set; } = string.Empty;
+        public string FromName { get; set; } = string.Empty;
+        public string ToEmail { get; set; } = string.Empty;
+        public string ToName { get; set; } = string.Empty;
+        public int EmailRateLimit { get; set; } = 2; // Default to 2 emails per IP
+    }
 }

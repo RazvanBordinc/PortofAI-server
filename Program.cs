@@ -54,11 +54,35 @@ catch (Exception ex)
     builder.Services.AddSingleton<IConnectionMultiplexer>(ConnectionMultiplexer.Connect("localhost"));
 }
 
+// Configure SendGrid options
+builder.Services.Configure<SendGridOptions>(options =>
+{
+    options.ApiKey = builder.Configuration["SendGrid:ApiKey"] ??
+                     Environment.GetEnvironmentVariable("SENDGRID_API_KEY") ??
+                     "";
+    options.FromEmail = builder.Configuration["SendGrid:FromEmail"] ?? "bordincrazvan2004@gmail.com";
+    options.FromName = builder.Configuration["SendGrid:FromName"] ?? "Razvan Bordinc Portfolio";
+    options.ToEmail = builder.Configuration["SendGrid:ToEmail"] ?? "bordincrazvan2004@gmail.com";
+    options.ToName = builder.Configuration["SendGrid:ToName"] ?? "Razvan Bordinc";
+
+    // Set email rate limit (default is 2)
+    if (int.TryParse(builder.Configuration["SendGrid:EmailRateLimit"], out int limit))
+    {
+        options.EmailRateLimit = limit;
+    }
+    else
+    {
+        options.EmailRateLimit = 2; // Default to 2 emails per IP
+    }
+
+    Console.WriteLine($"Configured SendGrid with FromEmail={options.FromEmail}, EmailRateLimit={options.EmailRateLimit}");
+});
+
 // Register our services
 builder.Services.AddSingleton<IConversationService, ConversationService>();
 builder.Services.AddSingleton<IRateLimiterService, RateLimiterService>();
 builder.Services.AddScoped<IGeminiService, GeminiService>();
-builder.Services.AddScoped<IEmailService, EmailService>(); // Register the new EmailService
+builder.Services.AddScoped<IEmailService, EmailService>(); // Register the SendGrid EmailService
 
 // Register Portfolio Service
 builder.Services.AddSingleton<IPortfolioService, RedisPortfolioService>();
@@ -69,11 +93,6 @@ builder.Services.AddHttpClient<IGeminiService, GeminiService>(client =>
     client.BaseAddress = new Uri("https://generativelanguage.googleapis.com/");
     client.Timeout = TimeSpan.FromSeconds(30);
 });
-
-// Configure SMTP options
-builder.Services.Configure<SmtpOptions>(
-    builder.Configuration.GetSection("Smtp")
-);
 
 // Configure CORS
 builder.Services.AddCors(options =>
