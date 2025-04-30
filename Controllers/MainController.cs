@@ -241,39 +241,43 @@ namespace Portfolio_server.Controllers
 
             try
             {
-                // Try to use the Redis portfolio service to get the recipient email
                 var ipAddress = GetClientIpAddress();
                 _logger.LogInformation($"[{requestId}] Processing contact request from {request.Name} from IP: {ipAddress}");
 
-                // Try the email service
-                bool emailSent = await _emailService.SendContactEmailAsync(request);
+                // Try to send the email - this now stores in Redis automatically first
+                bool result = await _emailService.SendContactEmailAsync(request);
 
-                if (emailSent)
+                if (result)
                 {
-                    _logger.LogInformation($"[{requestId}] Email successfully sent from {request.Name}");
-                    return Ok(new { message = "Your message has been sent successfully" });
+                    _logger.LogInformation($"[{requestId}] Contact form processed successfully for {request.Name}");
+                    return Ok(new
+                    {
+                        message = "Your message has been sent successfully. Thank you for contacting me!",
+                        success = true
+                    });
                 }
                 else
                 {
-                    // Email failed to send but didn't throw an exception
-                    _logger.LogWarning($"[{requestId}] Failed to send contact email from {request.Name} ({request.Email})");
-
-                    // Since we're storing the request in Redis as a backup in the EmailService, 
-                    // we'll still indicate success to the user even though the email failed
+                    // Even if email sending failed, the message is stored in Redis, so we still return 200 OK
+                    _logger.LogWarning($"[{requestId}] Failed to send contact email from {request.Name} ({request.Email}), but saved to Redis");
                     return Ok(new
                     {
-                        message = "Your message has been received. Thank you for contacting us.",
-                        note = "Your message is saved and will be processed as soon as possible."
+                        message = "Your message has been received. Thank you for contacting me - I'll get back to you soon!",
+                        success = true,
+                        note = "Message saved and will be processed shortly."
                     });
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, $"[{requestId}] Error processing contact form submission");
+                _logger.LogError(ex, $"[{requestId}] Error processing contact form submission from {request.Name}");
+
+                // Provide a useful fallback even on error
                 return StatusCode(500, new
                 {
-                    message = "An error occurred while sending your message. Please try again later or contact directly via email.",
-                    contactEmail = "razvan.bordinc@yahoo.com" // Provide direct contact email as fallback
+                    message = "There was an issue processing your message. Please try again or contact me directly via email.",
+                    contactEmail = "razvan.bordinc@yahoo.com",
+                    success = false
                 });
             }
         }

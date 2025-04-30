@@ -303,157 +303,182 @@ namespace Portfolio_server.Services
             };
         }
 
-      // In GeminiService.cs - find the CallGeminiApiAsync method and update the error handling:
-
-private async Task<string> CallGeminiApiAsync(string promptText)
-{
-    try
-    {
-        // Construct the API endpoint URL with the API key
-        string apiUrl = $"v1beta/models/{_modelName}:generateContent?key={_apiKey}";
-        _logger.LogDebug($"Using API URL: {apiUrl.Replace(_apiKey, "API_KEY_REDACTED")}");
-
-        // Prepare the request payload
-        var requestData = new
+        private async Task<string> CallGeminiApiAsync(string promptText)
         {
-            contents = new[]
+            int maxRetries = 3;
+            int currentRetry = 0;
+            int baseDelayMs = 1000; // Start with 1 second delay
+
+            while (true)
             {
-                new
-                {
-                    role = "user",
-                    parts = new[]
-                    {
-                        new { text = promptText }
-                    }
-                }
-            },
-            generationConfig = new
-            {
-                temperature = 0.7,
-                topK = 40,
-                topP = 0.95,
-                maxOutputTokens = 8192,
-                stopSequences = Array.Empty<string>()
-            },
-            safetySettings = new[]
-            {
-                new { category = "HARM_CATEGORY_HARASSMENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
-                new { category = "HARM_CATEGORY_HATE_SPEECH", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
-                new { category = "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
-                new { category = "HARM_CATEGORY_DANGEROUS_CONTENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" }
-            }
-        };
-
-        // Serialize to JSON
-        string jsonContent = JsonSerializer.Serialize(requestData, _jsonOptions);
-        var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
-
-        _logger.LogInformation("Sending request to Gemini API");
-
-        // Send the request
-        var response = await _httpClient.PostAsync(apiUrl, content);
-
-        // Log response code
-        _logger.LogDebug($"Gemini API response status code: {(int)response.StatusCode} {response.StatusCode}");
-
-        // If the response is not successful, handle different error cases
-        if (!response.IsSuccessStatusCode)
-        {
-            string errorMessage = await response.Content.ReadAsStringAsync();
-            _logger.LogError($"Gemini API Error: Status {response.StatusCode}, Message: {errorMessage}");
-
-            // Provide a formatted fallback message with email and URL examples
-            string formattedFallback = "I'm sorry, I'm currently experiencing a technical issue connecting to my knowledge base. " +
-                "This is likely a temporary problem.\n\n" +
-                "While I can't answer your specific question right now, you can:\n\n" +
-                "1. Try again in a few minutes\n" +
-                "2. Contact me directly at **razvan.bordinc@yahoo.com**\n" +
-                "3. Visit my GitHub profile at https://github.com/RazvanBordinc\n\n" +
-                "I apologize for the inconvenience and appreciate your understanding.";
-
-            // For 503 specifically, mention the service is overloaded
-            if ((int)response.StatusCode == 503)
-            {
-                return formattedFallback + "\n\n(The Gemini API is currently overloaded. This is a temporary issue with Google's services.)";
-            }
-
-            // Provide a more helpful error message based on status code
-            return (int)response.StatusCode switch
-            {
-                400 => formattedFallback,
-                401 => formattedFallback,
-                403 => formattedFallback,
-                404 => formattedFallback,
-                429 => formattedFallback + "\n\n(The API is currently experiencing high traffic. Please try again soon.)",
-                _ => formattedFallback
-            };
-        }
-
- 
-
-                // Parse the response
-                string responseJson = await response.Content.ReadAsStringAsync();
-                _logger.LogDebug($"Received response from Gemini API, length: {responseJson.Length}");
-
                 try
                 {
-                    // Try to parse the JSON response
-                    var responseObj = JsonSerializer.Deserialize<JsonElement>(responseJson);
+                    // Construct the API endpoint URL with the API key
+                    string apiUrl = $"v1beta/models/{_modelName}:generateContent?key={_apiKey}";
 
-                    // Check if candidates array exists and has at least one element
-                    if (responseObj.TryGetProperty("candidates", out var candidates) &&
-                        candidates.ValueKind == JsonValueKind.Array &&
-                        candidates.GetArrayLength() > 0)
+                    // Prepare the request payload with proper temperature and safer settings
+                    var requestData = new
                     {
-                        // Get the first candidate
-                        var candidate = candidates[0];
-
-                        // Check if it has content
-                        if (candidate.TryGetProperty("content", out var contentT))
+                        contents = new[]
                         {
-                            // Check if content has parts
-                            if (contentT.TryGetProperty("parts", out var parts) &&
-                                parts.ValueKind == JsonValueKind.Array &&
-                                parts.GetArrayLength() > 0)
-                            {
-                                // Get first part
-                                var part = parts[0];
+                    new
+                    {
+                        role = "user",
+                        parts = new[]
+                        {
+                            new { text = promptText }
+                        }
+                    }
+                },
+                        generationConfig = new
+                        {
+                            temperature = 0.7,
+                            topK = 40,
+                            topP = 0.95,
+                            maxOutputTokens = 8192,
+                            stopSequences = Array.Empty<string>()
+                        },
+                        safetySettings = new[]
+                        {
+                    new { category = "HARM_CATEGORY_HARASSMENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                    new { category = "HARM_CATEGORY_HATE_SPEECH", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                    new { category = "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                    new { category = "HARM_CATEGORY_DANGEROUS_CONTENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" }
+                }
+                    };
 
-                                // Get text
-                                if (part.TryGetProperty("text", out var textElement))
+                    // Serialize to JSON
+                    string jsonContent = JsonSerializer.Serialize(requestData, _jsonOptions);
+                    var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+                    // Send the request with timeout
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                    var response = await _httpClient.PostAsync(apiUrl, content, cts.Token);
+
+                    // If the response is not successful, handle different error cases
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        string errorMessage = await response.Content.ReadAsStringAsync();
+                        _logger.LogError($"Gemini API Error: Status {response.StatusCode}, Message: {errorMessage}");
+
+                        // For 503 specifically, retry the request
+                        if ((int)response.StatusCode == 503)
+                        {
+                            if (currentRetry < maxRetries)
+                            {
+                                // Calculate delay with exponential backoff
+                                int delayMs = baseDelayMs * (int)Math.Pow(2, currentRetry);
+                                _logger.LogWarning($"Gemini API returned 503, retrying in {delayMs}ms (attempt {currentRetry + 1}/{maxRetries})");
+
+                                await Task.Delay(delayMs);
+                                currentRetry++;
+                                continue; // Try again
+                            }
+
+                            // If we've reached max retries, return a friendly error message
+                            return "I'm sorry, but the AI service is currently experiencing high traffic. Please try again in a few moments.\n\nIn the meantime, you can contact me directly at razvan.bordinc@yahoo.com or check out my GitHub at https://github.com/RazvanBordinc.";
+                        }
+
+                        // Handle other error cases with appropriate messages
+                        return (int)response.StatusCode switch
+                        {
+                            400 => "I apologize, but there was an error with the request format. Please try again with a simpler message.",
+                            401 or 403 => "I'm experiencing authentication issues with my AI service. This is likely a temporary problem with my API configuration.",
+                            404 => "The AI model endpoint couldn't be found. This is likely a temporary configuration issue.",
+                            429 => "The AI service has reached its rate limit. Please try again in a few minutes.",
+                            _ => "I'm having trouble connecting to my knowledge source right now. Please try again later."
+                        };
+                    }
+
+                    // Parse the response
+                    string responseJson = await response.Content.ReadAsStringAsync();
+
+                    try
+                    {
+                        // Try to parse the JSON response
+                        var responseObj = JsonSerializer.Deserialize<JsonElement>(responseJson);
+
+                        // Check if candidates array exists and has at least one element
+                        if (responseObj.TryGetProperty("candidates", out var candidates) &&
+                            candidates.ValueKind == JsonValueKind.Array &&
+                            candidates.GetArrayLength() > 0)
+                        {
+                            // Get the first candidate
+                            var candidate = candidates[0];
+
+                            // Check if it has content
+                            if (candidate.TryGetProperty("content", out var contentT))
+                            {
+                                // Check if content has parts
+                                if (contentT.TryGetProperty("parts", out var parts) &&
+                                    parts.ValueKind == JsonValueKind.Array &&
+                                    parts.GetArrayLength() > 0)
                                 {
-                                    string text = textElement.GetString();
-                                    if (!string.IsNullOrEmpty(text))
+                                    // Get first part
+                                    var part = parts[0];
+
+                                    // Get text
+                                    if (part.TryGetProperty("text", out var textElement))
                                     {
-                                        _logger.LogInformation($"Successfully extracted response text (length: {text.Length})");
-                                        return text;
+                                        string text = textElement.GetString();
+                                        if (!string.IsNullOrEmpty(text))
+                                        {
+                                            return text;
+                                        }
                                     }
                                 }
                             }
                         }
+
+                        // If we got here, we couldn't extract the text
+                        _logger.LogWarning("Could not extract text from Gemini API response");
+                        return "I'm sorry, I couldn't generate a proper response. Please try again with a different question.";
+                    }
+                    catch (JsonException ex)
+                    {
+                        _logger.LogError(ex, "Error parsing Gemini API response JSON");
+                        return "I'm sorry, there was an error processing the response from my knowledge source.";
+                    }
+                }
+                catch (TaskCanceledException)
+                {
+                    _logger.LogWarning("Gemini API request timed out");
+
+                    if (currentRetry < maxRetries)
+                    {
+                        // Calculate delay with exponential backoff
+                        int delayMs = baseDelayMs * (int)Math.Pow(2, currentRetry);
+                        _logger.LogWarning($"Request timed out, retrying in {delayMs}ms (attempt {currentRetry + 1}/{maxRetries})");
+
+                        await Task.Delay(delayMs);
+                        currentRetry++;
+                        continue; // Try again
                     }
 
-                    // If we got here, we couldn't extract the text
-                    _logger.LogWarning("Could not extract text from Gemini API response. JSON structure: " + responseJson);
-
-                    // Return a fallback response
-                    return "I'm sorry, I couldn't generate a proper response. Please try again.";
+                    return "I'm sorry, but the request is taking longer than expected. Please try again with a shorter message, or try again later.";
                 }
-                catch (JsonException ex)
+                catch (HttpRequestException ex)
                 {
-                    _logger.LogError(ex, "Error parsing Gemini API response JSON");
-                    return "I'm sorry, there was an error processing the response from my knowledge source.";
+                    _logger.LogError(ex, "HTTP error calling Gemini API");
+
+                    if (currentRetry < maxRetries)
+                    {
+                        // Calculate delay with exponential backoff
+                        int delayMs = baseDelayMs * (int)Math.Pow(2, currentRetry);
+                        _logger.LogWarning($"HTTP error, retrying in {delayMs}ms (attempt {currentRetry + 1}/{maxRetries})");
+
+                        await Task.Delay(delayMs);
+                        currentRetry++;
+                        continue; // Try again
+                    }
+
+                    return "I'm having trouble connecting to my knowledge source right now. Please try again later.";
                 }
-            }
-            catch (HttpRequestException ex)
-            {
-                _logger.LogError(ex, "HTTP error calling Gemini API");
-                return "I'm having trouble connecting to my knowledge source right now. Please try again later.";
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Unexpected error calling Gemini API");
-                return "I'm sorry, an unexpected error occurred while processing your request.";
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Unexpected error calling Gemini API");
+                    return "I'm sorry, an unexpected error occurred while processing your request.";
+                }
             }
         }
 

@@ -12,6 +12,9 @@ FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS final
 WORKDIR /app
 COPY --from=publish /app/publish .
 
+# Install curl for healthcheck
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
 # Enable console logging
 ENV ASPNETCORE_LOGGING__CONSOLE__DISABLECOLORS=false
 ENV ASPNETCORE_LOGGING__CONSOLE__FORMATTERNAME=Simple

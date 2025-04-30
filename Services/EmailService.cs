@@ -1,9 +1,12 @@
 ﻿using Microsoft.Extensions.Options;
 using Portfolio_server.Models;
-using System.Net.Mail;
-using System.Net;
 using StackExchange.Redis;
 using System.Text.Json;
+using System.Net;
+using MimeKit;
+// Using MailKit explicitly with alias to avoid ambiguity
+using MailKitSmtp = MailKit.Net.Smtp;
+using MailKit.Security;
 
 namespace Portfolio_server.Services
 {
@@ -22,121 +25,143 @@ namespace Portfolio_server.Services
             _smtpOptions = smtpOptions?.Value ?? throw new ArgumentNullException(nameof(smtpOptions));
             _redis = redis;
 
-            // Log SMTP settings (without password) for debugging
+            // Log SMTP settings (without password)
             _logger.LogInformation($"Email service initialized with: Host={_smtpOptions.Host}, Port={_smtpOptions.Port}, SSL={_smtpOptions.EnableSsl}, Username={_smtpOptions.Username}");
         }
 
         public async Task<bool> SendContactEmailAsync(ContactRequest contactRequest)
         {
+            if (contactRequest == null)
+            {
+                _logger.LogWarning("Invalid contact request: null request");
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(contactRequest.Name) ||
+                string.IsNullOrEmpty(contactRequest.Email) ||
+                string.IsNullOrEmpty(contactRequest.Message))
+            {
+                _logger.LogWarning("Invalid contact request: Missing required fields");
+                return false;
+            }
+
+            // Always store in Redis as backup first
+            bool storedInRedis = await StoreContactInRedisAsync(contactRequest);
+
+            if (!storedInRedis)
+            {
+                _logger.LogWarning($"Failed to store contact request from {contactRequest.Name} in Redis");
+            }
+            else
+            {
+                _logger.LogInformation($"Successfully stored contact request from {contactRequest.Name} in Redis");
+            }
+
+            // Try sending the email with MailKit
+            bool emailSent = await SendEmailWithMailKitAsync(contactRequest);
+
+            // Return true if either the email was sent OR it was stored in Redis
+            return emailSent || storedInRedis;
+        }
+
+        private async Task<bool> SendEmailWithMailKitAsync(ContactRequest contactRequest)
+        {
             try
             {
-                if (contactRequest == null)
-                {
-                    throw new ArgumentNullException(nameof(contactRequest));
-                }
-
-                if (string.IsNullOrEmpty(contactRequest.Name) ||
-                    string.IsNullOrEmpty(contactRequest.Email) ||
-                    string.IsNullOrEmpty(contactRequest.Message))
-                {
-                    _logger.LogWarning("Invalid contact request: Missing required fields");
-                    return false;
-                }
-
-                // Store the contact request in Redis first (as backup)
-                await StoreContactRequestInRedisAsync(contactRequest);
-                _logger.LogInformation($"Stored contact request from {contactRequest.Name} in Redis for backup");
-
-                // Check if we have SMTP password set
-                if (string.IsNullOrEmpty(_smtpOptions.Password) || _smtpOptions.Password == "YOUR_YAHOO_APP_PASSWORD")
-                {
-                    _logger.LogError("SMTP password not configured. Please set a valid password in configuration.");
-                    return false;
-                }
-
-                // Always use the configured username for sending
-                string senderEmail = _smtpOptions.Username;
-                _logger.LogInformation($"Using sender email: {senderEmail}");
+                _logger.LogInformation($"Attempting to send email with MailKit from {contactRequest.Name} via {_smtpOptions.Host}:{_smtpOptions.Port}");
 
                 // Create the email message
-                var message = new MailMessage
+                var message = new MimeMessage();
+                message.From.Add(new MailboxAddress("Portfolio Contact Form", _smtpOptions.Username));
+                message.To.Add(new MailboxAddress("Razvan Bordinc", _smtpOptions.Username));
+                message.ReplyTo.Add(new MailboxAddress(contactRequest.Name, contactRequest.Email));
+                message.Subject = $"Portfolio Contact: {contactRequest.Name}";
+
+                // Create HTML body
+                var bodyBuilder = new BodyBuilder
                 {
-                    From = new MailAddress(senderEmail),
-                    Subject = $"Portfolio Contact: {contactRequest.Name}",
-                    Body = FormatEmailBody(contactRequest),
-                    IsBodyHtml = true
+                    HtmlBody = FormatEmailBody(contactRequest)
                 };
 
-                // Add recipient (your email address)
-                message.To.Add(new MailAddress(senderEmail));
+                message.Body = bodyBuilder.ToMessageBody();
 
-                // Set up reply-to so you can reply directly to the sender
-                message.ReplyToList.Add(new MailAddress(contactRequest.Email, contactRequest.Name));
-
-                // Configure SMTP client with more robust error handling
-                using var client = new SmtpClient
+                // Send using MailKit's SmtpClient - note we're using the MailKit version explicitly
+                using (var client = new MailKitSmtp.SmtpClient())
                 {
-                    Host = _smtpOptions.Host,
-                    Port = _smtpOptions.Port,
-                    EnableSsl = _smtpOptions.EnableSsl,
-                    DeliveryMethod = SmtpDeliveryMethod.Network,
-                    UseDefaultCredentials = false,
-                    Credentials = new NetworkCredential(senderEmail, _smtpOptions.Password),
-                    Timeout = 30000 // 30 seconds timeout
-                };
+                    // Configure security based on port
+                    var securityOptions = SecureSocketOptions.Auto;
+                    if (_smtpOptions.Port == 465)
+                    {
+                        securityOptions = SecureSocketOptions.SslOnConnect;
+                    }
+                    else if (_smtpOptions.Port == 587)
+                    {
+                        securityOptions = SecureSocketOptions.StartTls;
+                    }
 
-                _logger.LogInformation($"Attempting to send email via {_smtpOptions.Host}:{_smtpOptions.Port}");
+                    client.Timeout = 15000; // 15 second timeout
 
-                try
-                {
-                    // Send the email
-                    await client.SendMailAsync(message);
-                    _logger.LogInformation($"Contact email sent successfully from {contactRequest.Name} ({contactRequest.Email})");
+                    // Connect to SMTP server
+                    await client.ConnectAsync(_smtpOptions.Host, _smtpOptions.Port, securityOptions);
+
+                    // Authenticate
+                    await client.AuthenticateAsync(_smtpOptions.Username, _smtpOptions.Password);
+
+                    // Send the message
+                    await client.SendAsync(message);
+
+                    // Disconnect properly
+                    await client.DisconnectAsync(true);
+
+                    _logger.LogInformation($"Email sent successfully via MailKit from {contactRequest.Name} ({contactRequest.Email})");
                     return true;
-                }
-                catch (SmtpException smtpEx)
-                {
-                    _logger.LogError(smtpEx, "SMTP Error sending contact email");
-
-                    // Log specific error code
-                    _logger.LogError($"SMTP Status Code: {smtpEx.StatusCode}, Response: {smtpEx.Message}");
-
-                    // For certain SMTP errors, provide more detailed troubleshooting
-                    if (smtpEx.StatusCode == SmtpStatusCode.MailboxUnavailable)
-                    {
-                        _logger.LogError("Mailbox unavailable error. Check that Yahoo App Password is correct and enabled.");
-                    }
-                    else if (smtpEx.Message.Contains("authentication"))
-                    {
-                        _logger.LogError("Authentication error. Verify username and password in configuration.");
-                    }
-
-                    // Already stored contact in Redis at the beginning
-                    return false;
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error sending contact email");
+                _logger.LogError(ex, $"Error sending email with MailKit from {contactRequest.Name}");
                 return false;
             }
         }
 
-        private async Task StoreContactRequestInRedisAsync(ContactRequest contactRequest)
+        private async Task<bool> StoreContactInRedisAsync(ContactRequest contactRequest)
         {
             try
             {
-                if (_redis == null) return;
+                if (_redis == null) return false;
 
                 var db = _redis.GetDatabase();
-                var key = $"contact:request:{DateTime.UtcNow.Ticks}";
+                if (db == null) return false;
 
-                var content = JsonSerializer.Serialize(contactRequest);
-                await db.StringSetAsync(key, content, TimeSpan.FromDays(30));
+                // Use timestamp for unique key
+                var timestamp = DateTime.UtcNow.Ticks;
+                var uniqueKey = $"contact:request:{timestamp}";
+
+                // Create data dictionary
+                var contactData = new Dictionary<string, string>
+                {
+                    ["name"] = contactRequest.Name,
+                    ["email"] = contactRequest.Email,
+                    ["phone"] = contactRequest.Phone ?? "Not provided",
+                    ["message"] = contactRequest.Message,
+                    ["timestamp"] = timestamp.ToString(),
+                    ["date"] = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")
+                };
+
+                // Serialize and store as string
+                string jsonData = JsonSerializer.Serialize(contactData);
+                await db.StringSetAsync(uniqueKey, jsonData, TimeSpan.FromDays(30));
+
+                // Maintain a simple index of contact requests
+                string indexKey = "contact:index";
+                await db.SetAddAsync(indexKey, uniqueKey);
+
+                return true;
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Error storing contact request in Redis");
+                return false;
             }
         }
 
@@ -162,28 +187,12 @@ namespace Portfolio_server.Services
                         
                         <div style='margin-top: 20px; font-size: 0.9em; color: #666;'>
                             <p>This message was sent from your portfolio website contact form.</p>
-                            <p>IP: {GetIpAddress()}</p>
                             <p>Date: {DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss")} UTC</p>
                         </div>
                     </div>
                 </body>
                 </html>
             ";
-        }
-
-        private string GetIpAddress()
-        {
-            try
-            {
-                return Dns.GetHostEntry(Dns.GetHostName())
-                    .AddressList
-                    .FirstOrDefault(ip => ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-                    ?.ToString() ?? "Unknown";
-            }
-            catch
-            {
-                return "Unknown";
-            }
         }
     }
 }
