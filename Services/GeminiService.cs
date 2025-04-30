@@ -93,72 +93,110 @@ namespace Portfolio_server.Services
         }
 
         // Simplified streaming implementation
-        public async Task<string> StreamMessageAsync(
-            string message,
-            string sessionId,
-            string style,
-            Func<string, Task> onChunkReceived,
-            CancellationToken cancellationToken)
+       public async Task<string> StreamMessageAsync(
+    string message,
+    string sessionId,
+    string style,
+    Func<string, Task> onChunkReceived,
+    CancellationToken cancellationToken)
+    {
+    try
+    {
+        _logger.LogInformation($"Streaming message with style: {style}");
+
+        // Get conversation history
+        string conversationHistory = await _conversationService.GetConversationHistoryAsync(sessionId);
+
+        // Build prompt
+        string promptText = BuildPrompt(message, conversationHistory, style);
+
+        try
         {
-            try
+            // Try to call the Gemini API
+            string fullResponse = await CallGeminiApiAsync(promptText);
+            
+            _logger.LogInformation($"Generated full response length: {fullResponse?.Length ?? 0}");
+
+            if (string.IsNullOrEmpty(fullResponse))
             {
-                _logger.LogInformation($"Streaming message with style: {style}");
-
-                // Get conversation history
-                string conversationHistory = await _conversationService.GetConversationHistoryAsync(sessionId);
-
-                // Build prompt
-                string promptText = BuildPrompt(message, conversationHistory, style);
-
-                // Instead of streaming, use the non-streaming method and simulate streaming
-                // This is a temporary fallback until the streaming issues are fixed
-                string fullResponse = await CallGeminiApiAsync(promptText);
-
-                _logger.LogInformation($"Generated full response length: {fullResponse?.Length ?? 0}");
-
-                if (string.IsNullOrEmpty(fullResponse))
-                {
-                    // If we got no response, create a fallback
-                    fullResponse = "I'm sorry, I couldn't generate a response at this time. Please try again later.";
-                    await onChunkReceived(fullResponse);
-                    return fullResponse;
-                }
-
-                // Simulate streaming by chunking the response
-                int chunkSize = 25; // Characters per chunk
-
-                for (int i = 0; i < fullResponse.Length; i += chunkSize)
-                {
-                    // Check for cancellation
-                    if (cancellationToken.IsCancellationRequested)
-                        break;
-
-                    // Get chunk (up to chunkSize or end of text)
-                    int remainingLength = Math.Min(chunkSize, fullResponse.Length - i);
-                    string chunk = fullResponse.Substring(i, remainingLength);
-
-                    // Send chunk to client
-                    await onChunkReceived(chunk);
-
-                    // Small delay to simulate typing
-                    await Task.Delay(50, cancellationToken);
-                }
-
-                // Check for contact query in original message
-                if (IsContactQuery(message) && !fullResponse.Contains("[format:contact]"))
-                {
-                    fullResponse = EnhanceContactResponse(fullResponse);
-                }
-
+                // If we got no response, create a fallback
+                fullResponse = "I'm sorry, I couldn't generate a response at this time. Please try again later.";
+                await onChunkReceived(fullResponse);
                 return fullResponse;
             }
-            catch (Exception ex)
+
+            // Check if response contains error message about API overload
+            bool isErrorResponse = fullResponse.Contains("The Gemini API is currently overloaded") || 
+                                  fullResponse.Contains("technical issue connecting");
+
+            if (isErrorResponse)
             {
-                _logger.LogError(ex, "Error in StreamMessageAsync");
-                await onChunkReceived("I'm sorry, I encountered a technical issue and couldn't process your request.");
-                return "Error processing request";
+                // For error responses, don't simulate streaming - send it all at once
+                await onChunkReceived(fullResponse);
+                return fullResponse;
             }
+
+            // For successful responses, simulate streaming by chunking
+            int chunkSize = 25; // Characters per chunk
+
+            for (int i = 0; i < fullResponse.Length; i += chunkSize)
+            {
+                // Check for cancellation
+                if (cancellationToken.IsCancellationRequested)
+                    break;
+
+                // Get chunk (up to chunkSize or end of text)
+                int remainingLength = Math.Min(chunkSize, fullResponse.Length - i);
+                string chunk = fullResponse.Substring(i, remainingLength);
+
+                // Send chunk to client
+                await onChunkReceived(chunk);
+
+                // Small delay to simulate typing
+                await Task.Delay(50, cancellationToken);
+            }
+
+            // Check for contact query in original message
+            if (IsContactQuery(message) && !fullResponse.Contains("[format:contact]"))
+            {
+                fullResponse = EnhanceContactResponse(fullResponse);
+            }
+
+            return fullResponse;
         }
+        catch (HttpRequestException httpEx)
+        {
+            _logger.LogError(httpEx, $"HTTP error calling Gemini API: {httpEx.Message}");
+            
+            // Create a nicely formatted response with examples of styling for testing
+            string errorResponse = "I apologize, but I'm currently experiencing connectivity issues with my AI service. " +
+                "This is likely a temporary problem.\n\n" +
+                "While I can't answer your specific question right now, you can:\n\n" +
+                "1. Try again in a few minutes\n" +
+                "2. Contact Razvan directly at **razvan.bordinc@yahoo.com**\n" +
+                "3. Visit the GitHub profile at https://github.com/RazvanBordinc\n\n" +
+                "Error details: " + httpEx.Message;
+            
+            await onChunkReceived(errorResponse);
+            return errorResponse;
+        }
+    }
+    catch (Exception ex)
+    {
+        _logger.LogError(ex, "Error in StreamMessageAsync");
+        
+        // Create a fallback response with properly formatted text to test styling
+        string fallbackResponse = "I'm sorry, I encountered a technical issue and couldn't process your request.\n\n" +
+            "In the meantime, you can contact me directly at razvan.bordinc@yahoo.com or check out my GitHub at https://github.com/RazvanBordinc.\n\n" +
+            "Here's some **formatted text** to demonstrate styling capabilities, including *italics* and `code blocks`.\n\n" +
+            "Try again later when the service is available.";
+        
+        // Send the fallback response as a chunk
+        await onChunkReceived(fallbackResponse);
+        
+        return fallbackResponse;
+    }
+}
 
         private bool IsContactQuery(string message)
         {
@@ -265,74 +303,93 @@ namespace Portfolio_server.Services
             };
         }
 
-        private async Task<string> CallGeminiApiAsync(string promptText)
+      // In GeminiService.cs - find the CallGeminiApiAsync method and update the error handling:
+
+private async Task<string> CallGeminiApiAsync(string promptText)
+{
+    try
+    {
+        // Construct the API endpoint URL with the API key
+        string apiUrl = $"v1beta/models/{_modelName}:generateContent?key={_apiKey}";
+        _logger.LogDebug($"Using API URL: {apiUrl.Replace(_apiKey, "API_KEY_REDACTED")}");
+
+        // Prepare the request payload
+        var requestData = new
         {
-            try
+            contents = new[]
             {
-                // Construct the API endpoint URL with the API key
-                string apiUrl = $"v1beta/models/{_modelName}:generateContent?key={_apiKey}";
-                _logger.LogDebug($"Using API URL: {apiUrl.Replace(_apiKey, "API_KEY_REDACTED")}");
-
-                // Prepare the request payload
-                var requestData = new
+                new
                 {
-                    contents = new[]
+                    role = "user",
+                    parts = new[]
                     {
-                        new
-                        {
-                            role = "user",
-                            parts = new[]
-                            {
-                                new { text = promptText }
-                            }
-                        }
-                    },
-                    generationConfig = new
-                    {
-                        temperature = 0.7,
-                        topK = 40,
-                        topP = 0.95,
-                        maxOutputTokens = 8192,
-                        stopSequences = Array.Empty<string>()
-                    },
-                    safetySettings = new[]
-                    {
-                        new { category = "HARM_CATEGORY_HARASSMENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
-                        new { category = "HARM_CATEGORY_HATE_SPEECH", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
-                        new { category = "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
-                        new { category = "HARM_CATEGORY_DANGEROUS_CONTENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" }
+                        new { text = promptText }
                     }
-                };
-
-                // Serialize to JSON
-                string jsonContent = JsonSerializer.Serialize(requestData, _jsonOptions);
-                var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
-
-                _logger.LogInformation("Sending request to Gemini API");
-
-                // Send the request
-                var response = await _httpClient.PostAsync(apiUrl, content);
-
-                // Log response code
-                _logger.LogDebug($"Gemini API response status code: {(int)response.StatusCode} {response.StatusCode}");
-
-                // If the response is not successful, handle different error cases
-                if (!response.IsSuccessStatusCode)
-                {
-                    string errorMessage = await response.Content.ReadAsStringAsync();
-                    _logger.LogError($"Gemini API Error: Status {response.StatusCode}, Message: {errorMessage}");
-
-                    // Provide a more helpful error message based on status code
-                    return (int)response.StatusCode switch
-                    {
-                        400 => "I'm sorry, there was an issue with the request. Please try again later.",
-                        401 => "I'm currently unable to access my knowledge due to authentication issues. Please check your API key configuration.",
-                        403 => "I don't have permission to access that information right now.",
-                        404 => "I'm sorry, I couldn't find the information you're looking for.",
-                        429 => "I'm currently experiencing high demand. Please try again in a little while.",
-                        _ => "I'm sorry, I'm having trouble processing your request right now. Please try again later."
-                    };
                 }
+            },
+            generationConfig = new
+            {
+                temperature = 0.7,
+                topK = 40,
+                topP = 0.95,
+                maxOutputTokens = 8192,
+                stopSequences = Array.Empty<string>()
+            },
+            safetySettings = new[]
+            {
+                new { category = "HARM_CATEGORY_HARASSMENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                new { category = "HARM_CATEGORY_HATE_SPEECH", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                new { category = "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
+                new { category = "HARM_CATEGORY_DANGEROUS_CONTENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" }
+            }
+        };
+
+        // Serialize to JSON
+        string jsonContent = JsonSerializer.Serialize(requestData, _jsonOptions);
+        var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
+
+        _logger.LogInformation("Sending request to Gemini API");
+
+        // Send the request
+        var response = await _httpClient.PostAsync(apiUrl, content);
+
+        // Log response code
+        _logger.LogDebug($"Gemini API response status code: {(int)response.StatusCode} {response.StatusCode}");
+
+        // If the response is not successful, handle different error cases
+        if (!response.IsSuccessStatusCode)
+        {
+            string errorMessage = await response.Content.ReadAsStringAsync();
+            _logger.LogError($"Gemini API Error: Status {response.StatusCode}, Message: {errorMessage}");
+
+            // Provide a formatted fallback message with email and URL examples
+            string formattedFallback = "I'm sorry, I'm currently experiencing a technical issue connecting to my knowledge base. " +
+                "This is likely a temporary problem.\n\n" +
+                "While I can't answer your specific question right now, you can:\n\n" +
+                "1. Try again in a few minutes\n" +
+                "2. Contact me directly at **razvan.bordinc@yahoo.com**\n" +
+                "3. Visit my GitHub profile at https://github.com/RazvanBordinc\n\n" +
+                "I apologize for the inconvenience and appreciate your understanding.";
+
+            // For 503 specifically, mention the service is overloaded
+            if ((int)response.StatusCode == 503)
+            {
+                return formattedFallback + "\n\n(The Gemini API is currently overloaded. This is a temporary issue with Google's services.)";
+            }
+
+            // Provide a more helpful error message based on status code
+            return (int)response.StatusCode switch
+            {
+                400 => formattedFallback,
+                401 => formattedFallback,
+                403 => formattedFallback,
+                404 => formattedFallback,
+                429 => formattedFallback + "\n\n(The API is currently experiencing high traffic. Please try again soon.)",
+                _ => formattedFallback
+            };
+        }
+
+ 
 
                 // Parse the response
                 string responseJson = await response.Content.ReadAsStringAsync();
