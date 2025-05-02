@@ -22,10 +22,10 @@ namespace Portfolio_server.Services
         private readonly JsonSerializerOptions _jsonOptions;
 
         public GeminiService(
-            ILogger<GeminiService> logger,
-            HttpClient httpClient,
-            IConversationService conversationService,
-            IConfiguration configuration)
+        ILogger<GeminiService> logger,
+        HttpClient httpClient,
+        IConversationService conversationService,
+        IConfiguration configuration)
         {
             _logger = logger;
             _httpClient = httpClient;
@@ -41,11 +41,12 @@ namespace Portfolio_server.Services
                 throw new InvalidOperationException("Gemini API key not configured");
             }
 
-            _logger.LogInformation($"API key configured with length: {_apiKey.Length}");
+            // Reduced unnecessary logging
+            _logger.LogDebug($"API key configured with length: {_apiKey.Length}");
 
             // Get model name
             _modelName = configuration["GeminiApi:ModelName"] ?? "gemini-2.0-flash";
-            _logger.LogInformation($"Using model: {_modelName}");
+            _logger.LogDebug($"Using model: {_modelName}");
 
             // Configure JSON options
             _jsonOptions = new JsonSerializerOptions
@@ -60,7 +61,7 @@ namespace Portfolio_server.Services
                 _httpClient.BaseAddress = new Uri("https://generativelanguage.googleapis.com/");
             }
 
-            _logger.LogInformation($"GeminiService initialized with model: {_modelName}");
+            _logger.LogDebug($"GeminiService initialized with model: {_modelName}");
         }
 
         public async Task<ProcessedResponse> ProcessMessageAsync(string message, string sessionId, string style = "NORMAL")
@@ -92,17 +93,16 @@ namespace Portfolio_server.Services
             }
         }
 
-        // Simplified streaming implementation
         public async Task<string> StreamMessageAsync(
-     string message,
-     string sessionId,
-     string style,
-     Func<string, Task> onChunkReceived,
-     CancellationToken cancellationToken)
+         string message,
+        string sessionId,
+        string style,
+        Func<string, Task> onChunkReceived,
+        CancellationToken cancellationToken)
         {
             try
             {
-                _logger.LogInformation($"Streaming message with style: {style}");
+                _logger.LogDebug($"Streaming message with style: {style}");
 
                 // Get conversation history
                 string conversationHistory = await _conversationService.GetConversationHistoryAsync(sessionId);
@@ -115,7 +115,7 @@ namespace Portfolio_server.Services
                     // Try to call the Gemini API
                     string fullResponse = await CallGeminiApiAsync(promptText);
 
-                    _logger.LogInformation($"Generated full response length: {fullResponse?.Length ?? 0}");
+                    _logger.LogDebug($"Generated full response length: {fullResponse?.Length ?? 0}");
 
                     if (string.IsNullOrEmpty(fullResponse))
                     {
@@ -195,7 +195,6 @@ namespace Portfolio_server.Services
                 // Create a fallback response with properly formatted text to test styling
                 string fallbackResponse = "I'm sorry, I encountered a technical issue and couldn't process your request.\n\n" +
                     "In the meantime, you can contact me directly at razvan.bordinc@yahoo.com or check out my GitHub at https://github.com/RazvanBordinc.\n\n" +
-                    "Here's some **formatted text** to demonstrate styling capabilities, including *italics* and `code blocks`.\n\n" +
                     "Try again later when the service is available.";
 
                 // Send the fallback response as a chunk
@@ -205,7 +204,7 @@ namespace Portfolio_server.Services
             }
         }
 
-         
+
 
         private bool IsContactQuery(string message)
         {
@@ -271,36 +270,20 @@ namespace Portfolio_server.Services
             var promptBuilder = new StringBuilder();
 
             // Basic instructions
-            promptBuilder.AppendLine("You are an AI chatbot representing Razvan Bordinc, a software engineer. Use the information in the portfolio data to answer questions accurately about Razvan's skills, projects, and experience.");
+            promptBuilder.AppendLine("You are an AI chatbot representing Razvan Bordinc, a software engineer. Use the information in the PORTFOLIO INFORMATION section to answer questions accurately about Razvan's skills, projects, and data about him, including experience.");
 
-            // ENHANCED: Always include critical information regardless of query
-            promptBuilder.AppendLine("\nCritical information you must remember:");
-            promptBuilder.AppendLine("- I always have technical skills, even if you don't see them in the portfolio data.");
-            promptBuilder.AppendLine("- Always respond as if you are knowledgeable about my skills, rather than saying you don't have information.");
-            promptBuilder.AppendLine("- If skills aren't in the data, mention that you know I'm skilled in .NET Core, React, Next.js, and related technologies.");
+            promptBuilder.AppendLine("CRITICAL INSTRUCTION:");
+            promptBuilder.AppendLine("RESPOND MANDATORY BASED ON THE INFORMATIONS YOU GOT ABOUT ME WITH TRUE FACTS ONLY!");
+            promptBuilder.AppendLine("SEND CONTACT ONLY WHEN YOU SENSE THE USER ASKS ABOUT GETTING IN TOUCH OR CONTACTING!");
+            promptBuilder.AppendLine("RESPOND STRICTLY TO WHAT THE USER ASKS, AND IF HE ASKS FOR BROADER TERMS, RESPOND WITH THE BROADER TERMS, EXAMPLE (IF HE ASKS ABOUT SKILLS, WRITE BOTH TECHNICAL AND SOFT SKILLS))");
 
             // IMPROVED: Formatting instructions
             promptBuilder.AppendLine("\nVery important formatting instructions:");
             promptBuilder.AppendLine("1. Format links EXACTLY like this: [text](url) - do not add any extra characters after the closing parenthesis.");
             promptBuilder.AppendLine("2. Never add brackets, braces or any JSON syntax at the end of your responses");
-            promptBuilder.AppendLine("3. For GitHub, use this link format: [github.com/RazvanBordinc](https://github.com/RazvanBordinc)");
+            promptBuilder.AppendLine("3. For GitHub, use this link format: [Github Profile](https://github.com/RazvanBordinc)");
             promptBuilder.AppendLine("4. For LinkedIn, use this link format: [LinkedIn Profile](https://linkedin.com/in/valentin-r%C4%83zvan-bord%C3%AEnc-30686a298/)");
 
-            promptBuilder.AppendLine("\nImportant contact information:");
-            promptBuilder.AppendLine("- Email: razvan.bordinc@yahoo.com");
-            promptBuilder.AppendLine("- GitHub: https://github.com/RazvanBordinc");
-            promptBuilder.AppendLine("- LinkedIn: https://linkedin.com/in/valentin-r%C4%83zvan-bord%C3%AEnc-30686a298/");
-
-            // If query is about skills, add fallback skills information
-            if (message.ToLower().Contains("skill") || message.ToLower().Contains("know") ||
-                message.ToLower().Contains("tech") || message.ToLower().Contains("expertise"))
-            {
-                promptBuilder.AppendLine("\nIMPORTANT - The user is asking about SKILLS. If you don't see detailed skills in the portfolio data, use this information:");
-                promptBuilder.AppendLine("I have these technical skills:");
-                promptBuilder.AppendLine("Backend: .NET Core, ASP.NET Core Web API, Entity Framework, SQL, Redis, Docker");
-                promptBuilder.AppendLine("Frontend: React, Next.js, JavaScript, Tailwind CSS, HTML/CSS, Framer Motion");
-                promptBuilder.AppendLine("Other: Git, GitHub, REST APIs, JSON, Responsive Design");
-            }
 
             // Add style instructions based on the specified style
             promptBuilder.AppendLine("\n" + GetStyleInstruction(style));
@@ -315,25 +298,6 @@ namespace Portfolio_server.Services
             // Add the current message
             promptBuilder.AppendLine("\nCurrent message:");
             promptBuilder.AppendLine(message);
-
-            // IMPROVED: Better special instructions detection
-            bool isContactQuery = IsContactQuery(message);
-            bool isSkillsQuery = message.ToLower().Contains("skill") || message.ToLower().Contains("know") ||
-                                 message.ToLower().Contains("tech") || message.ToLower().Contains("experience") ||
-                                 message.ToLower().Contains("aptitudini") || message.ToLower().Contains("abilitati");
-
-            if (isContactQuery)
-            {
-                promptBuilder.AppendLine("\nThis is a contact-related query. Please provide my contact information. Always use razvan.bordinc@yahoo.com as the email address.");
-            }
-
-            if (isSkillsQuery)
-            {
-                // Add explicit instructions to never say you don't have skills information
-                promptBuilder.AppendLine("\nIMPORTANT: This is a skills-related query. Never say you don't have information about my skills.");
-                promptBuilder.AppendLine("If you don't see skills in the portfolio data, use the fallback skills information I provided earlier.");
-                promptBuilder.AppendLine("Always respond with a comprehensive list of skills, grouped by category.");
-            }
 
             return promptBuilder.ToString();
         }
@@ -353,7 +317,7 @@ namespace Portfolio_server.Services
 
         private async Task<string> CallGeminiApiAsync(string promptText)
         {
-            int maxRetries = 5; // Increase from 3 to 5 for skills queries
+            int maxRetries = 5;  
             int currentRetry = 0;
             int baseDelayMs = 1000; // Start with 1 second delay
             Exception lastException = null;
@@ -365,7 +329,7 @@ namespace Portfolio_server.Services
                     // Construct the API endpoint URL with the API key
                     string apiUrl = $"v1beta/models/{_modelName}:generateContent?key={_apiKey}";
 
-                    // Prepare the request payload with proper temperature and safer settings
+ 
                     var requestData = new
                     {
                         contents = new[]
@@ -597,52 +561,6 @@ namespace Portfolio_server.Services
 
             return text;
         }
-        private string CleanJsonString(string jsonStr)
-        {
-            if (string.IsNullOrEmpty(jsonStr))
-                return jsonStr;
-
-            // Remove any potential trailing characters that might break JSON
-            jsonStr = Regex.Replace(jsonStr, @"\s*\]\s*\}\s*$", "]}");
-
-            // Replace unescaped newlines inside strings
-            jsonStr = Regex.Replace(jsonStr, @"(?<!\\)(""|')([^""]*?)(?<!\\)\n([^""]*?)(?<!\\)(""|')", "$1$2 $3$4");
-
-            // Replace JavaScript-style property names (without quotes) with JSON-style (with quotes)
-            jsonStr = Regex.Replace(jsonStr, @"([{,])\s*([a-zA-Z0-9_$]+)\s*:", "$1\"$2\":");
-
-            // Replace single quotes with double quotes (handling escaped quotes)
-            jsonStr = jsonStr
-                .Replace("\\'", "\\TEMP_QUOTE")  // Temporarily replace escaped single quotes
-                .Replace("'", "\"")              // Replace all single quotes with double quotes
-                .Replace("\\TEMP_QUOTE", "\\'"); // Restore escaped single quotes
-
-            // Remove trailing commas in objects and arrays
-            jsonStr = Regex.Replace(jsonStr, @",\s*}", "}");
-            jsonStr = Regex.Replace(jsonStr, @",\s*\]", "]");
-
-            // Fix unescaped control characters
-            jsonStr = Regex.Replace(jsonStr, @"[\x00-\x1F]", " ");
-
-            return jsonStr;
-        }
-
-        // Helper method for debugging
-        public string GetModelName()
-        {
-            return _modelName;
-        }
-
-        // Helper method to debug API key
-        public string GetApiKeyPreview()
-        {
-            if (string.IsNullOrEmpty(_apiKey))
-                return "Not set";
-
-            if (_apiKey.Length <= 5)
-                return "Too short";
-
-            return $"{_apiKey.Substring(0, 5)}... (length: {_apiKey.Length})";
-        }
+    
     }
 }
