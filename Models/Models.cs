@@ -41,21 +41,7 @@ namespace Portfolio_server.Models
         public string Message { get; set; } = string.Empty;
         public string? ClientIp { get; set; }  
     }
-    public class ProjectEntity
-    {
-        public int Id { get; set; }
-        public string Name { get; set; }
-        public string Description { get; set; }
-        public string Role { get; set; }
-        public string Highlights { get; set; }
-        public DateTime? StartDate { get; set; }
-        public DateTime? EndDate { get; set; }
-        public string ProjectUrl { get; set; }
-        public bool IsOpenSource { get; set; }
-        public string GitHubRepoUrl { get; set; }
-        public bool IsHighlighted { get; set; }
-        public int DisplayOrder { get; set; }
-    }
+   
 
     public class SendGridOptions
     {
@@ -65,5 +51,14 @@ namespace Portfolio_server.Models
         public string ToEmail { get; set; } = string.Empty;
         public string ToName { get; set; } = string.Empty;
         public int EmailRateLimit { get; set; } = 2; // Default to 2 emails per IP
+    }// Add this class to Models/Models.cs
+
+    // Model for chat message data transfer
+    public class MessageDto
+    {
+        public string Id { get; set; } = Guid.NewGuid().ToString();
+        public string Content { get; set; } = string.Empty;
+        public string Sender { get; set; } = string.Empty;
+        public DateTime Timestamp { get; set; } = DateTime.UtcNow;
     }
 }

@@ -1,4 +1,5 @@
-﻿using StackExchange.Redis;
+﻿using Portfolio_server.Models;
+using StackExchange.Redis;
 using System.Text.Json;
 
 namespace Portfolio_server.Services
@@ -65,7 +66,76 @@ namespace Portfolio_server.Services
                 return string.Empty;
             }
         }
+        public async Task<List<MessageDto>> GetFormattedConversationHistoryAsync(string sessionId)
+        {
+            if (!_redisAvailable)
+            {
+                _logger.LogWarning("Redis not available, returning empty conversation history");
+                return new List<MessageDto>();
+            }
 
+            try
+            {
+                var db = _redis.GetDatabase();
+                var key = $"conversation:{sessionId}";
+
+                var savedData = await db.StringGetAsync(key);
+                if (!savedData.HasValue)
+                {
+                    _logger.LogInformation($"No existing conversation found for session {sessionId}");
+                    return new List<MessageDto>();
+                }
+
+                var data = JsonSerializer.Deserialize<ConversationData>(savedData);
+                if (data == null || data.Messages == null || data.Messages.Count == 0)
+                {
+                    return new List<MessageDto>();
+                }
+
+                var formattedMessages = new List<MessageDto>();
+                var currentTimestamp = DateTime.UtcNow;
+
+                // Start with the oldest message (approximately 10 minutes ago)
+                var baseTimestamp = currentTimestamp.AddMinutes(-10);
+
+                for (int i = 0; i < data.Messages.Count; i++)
+                {
+                    var message = data.Messages[i];
+                    var messageDto = new MessageDto
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        // Calculate a timestamp with approximately 1 minute between messages
+                        Timestamp = baseTimestamp.AddMinutes(i)
+                    };
+
+                    if (message.StartsWith("Human: "))
+                    {
+                        messageDto.Content = message.Substring(7); // Remove "Human: " prefix
+                        messageDto.Sender = "user";
+                    }
+                    else if (message.StartsWith("AI: "))
+                    {
+                        messageDto.Content = message.Substring(4); // Remove "AI: " prefix
+                        messageDto.Sender = "ai";
+                    }
+                    else
+                    {
+                        // Skip unknown message format
+                        continue;
+                    }
+
+                    formattedMessages.Add(messageDto);
+                }
+
+                _logger.LogInformation($"Retrieved {formattedMessages.Count} formatted messages for session {sessionId}");
+                return formattedMessages;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error retrieving formatted conversation history for session {sessionId}");
+                return new List<MessageDto>();
+            }
+        }
         public async Task SaveConversationAsync(string sessionId, string userMessage, string aiResponse)
         {
             if (!_redisAvailable)

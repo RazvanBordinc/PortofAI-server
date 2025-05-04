@@ -222,6 +222,59 @@ namespace Portfolio_server.Controllers
                 await WriteErrorResponseAsync("An error occurred while processing your request. Please try again later.", StatusCodes.Status500InternalServerError);
             }
         }
+ 
+        [HttpGet("conversation/history")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> GetConversationHistory()
+        {
+            try
+            {
+                // Get client IP address to use as session ID
+                string ipAddress = GetClientIpAddress();
+                string sessionId = await GetOrCreateSessionId(ipAddress);
+
+                // Get conversation history
+                var historyData = await _conversationService.GetFormattedConversationHistoryAsync(sessionId);
+
+                if (historyData == null || !historyData.Any())
+                {
+                    return NotFound(new { message = "No conversation history found" });
+                }
+
+                return Ok(new { messages = historyData });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error retrieving conversation history");
+                return StatusCode(500, new { error = "Error retrieving conversation history" });
+            }
+        }
+
+ 
+        [HttpPost("conversation/clear")]
+        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status500InternalServerError)]
+        public async Task<IActionResult> ClearConversationHistory()
+        {
+            try
+            {
+                // Get client IP address to use as session ID
+                string ipAddress = GetClientIpAddress();
+                string sessionId = await GetOrCreateSessionId(ipAddress);
+
+                // Clear conversation history
+                bool success = await _conversationService.ClearConversationAsync(sessionId);
+
+                return Ok(new { success });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error clearing conversation history");
+                return StatusCode(500, new { error = "Error clearing conversation history" });
+            }
+        }
         [HttpPost("contact")]
         [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(object), StatusCodes.Status400BadRequest)]
