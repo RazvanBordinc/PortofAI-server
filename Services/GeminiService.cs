@@ -162,11 +162,7 @@ namespace Portfolio_server.Services
                         await Task.Delay(50, cancellationToken);
                     }
 
-                    // Check for contact query in original message
-                    if (IsContactQuery(message) && !fullResponse.Contains("[format:contact]"))
-                    {
-                        fullResponse = EnhanceContactResponse(fullResponse);
-                    }
+                   
 
                     // One final cleaning pass to ensure the complete response is well-formatted
                     return CleanMarkdownLinks(fullResponse);
@@ -204,66 +200,6 @@ namespace Portfolio_server.Services
             }
         }
 
-
-
-        private bool IsContactQuery(string message)
-        {
-            string lowerMessage = message.ToLower();
-            return lowerMessage.Contains("contact") ||
-                   lowerMessage.Contains("email") ||
-                   lowerMessage.Contains("reach") ||
-                   lowerMessage.Contains("message you") ||
-                   lowerMessage.Contains("get in touch") ||
-                   lowerMessage.Contains("connect with you");
-        }
-
-        private string EnhanceContactResponse(string response)
-        {
-            try
-            {
-                // Create a contact form data object
-                var contactData = new
-                {
-                    title = "Contact Form",
-                    recipientName = "Razvan Bordinc",
-                    recipientPosition = "Software Engineer",
-                    emailSubject = "Portfolio Contact",
-                    socialLinks = new[]
-                    {
-                new
-                {
-                    platform = "LinkedIn",
-                    url = "https://linkedin.com/in/valentin-r%C4%83zvan-bord%C3%AEnc-30686a298/",
-                    icon = "linkedin"
-                },
-                new
-                {
-                    platform = "GitHub",
-                    url = "https://github.com/RazvanBordinc",
-                    icon = "github"
-                },
-                new
-                {
-                    platform = "Email",
-                    url = "mailto:razvan.bordinc@yahoo.com",
-                    icon = "mail"
-                }
-            }
-                };
-
-                // Serialize to JSON without indentation to avoid formatting issues
-                string jsonData = JsonSerializer.Serialize(contactData, _jsonOptions);
-
-                // Format the contact response
-                return $"{response}\n\nYou can contact me using the form below or directly at razvan.bordinc@yahoo.com:\n\n[format:contact][data:{jsonData}][/format]";
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error generating contact form JSON");
-                return response;
-            }
-        }
-
         // Enhanced BuildPrompt method with better prompt engineering
         private string BuildPrompt(string message, string conversationHistory, string style)
         {
@@ -275,16 +211,18 @@ namespace Portfolio_server.Services
             promptBuilder.AppendLine("CRITICAL INSTRUCTION:");
             promptBuilder.AppendLine("DETECT THE LANGUAGE IT WAS WRITTEN TO YOU AND WRITE IN THE SAME LANGUAGE");
             promptBuilder.AppendLine("RESPOND MANDATORY BASED ON THE INFORMATIONS YOU GOT ABOUT ME WITH TRUE FACTS ONLY!");
-            promptBuilder.AppendLine("SEND CONTACT ONLY WHEN YOU SENSE THE USER ASKS ABOUT GETTING IN TOUCH OR CONTACTING!");// THIS ISN'T WORKING PROPERLY, MAYBE THE PROBLEM IS SOMEWHERE ELSE BUT IT IS ALMOST ALWAYS SENDING CONTACT
-            promptBuilder.AppendLine("RESPOND STRICTLY TO WHAT THE USER ASKS, AND IF HE ASKS FOR BROADER TERMS, RESPOND WITH THE BROADER TERMS, EXAMPLE (IF HE ASKS ABOUT SKILLS, WRITE BOTH TECHNICAL AND SOFT SKILLS))");
 
-            // IMPROVED: Formatting instructions
-            promptBuilder.AppendLine("\nVery important formatting instructions:");
-            promptBuilder.AppendLine("1. Format links EXACTLY like this: [text](url) - do not add any extra characters after the closing parenthesis.");
-            promptBuilder.AppendLine("2. Never add brackets, braces or any JSON syntax at the end of your responses");
-            promptBuilder.AppendLine("3. For GitHub, use this link format: [Github Profile](https://github.com/RazvanBordinc)");
-            promptBuilder.AppendLine("4. For LinkedIn, use this link format: [LinkedIn Profile](https://linkedin.com/in/valentin-r%C4%83zvan-bord%C3%AEnc-30686a298/)");
+            promptBuilder.AppendLine("FORMAT INSTRUCTIONS:");
+            promptBuilder.AppendLine("- If the user asks for ways to contact me or reach out to me, include the contact form using: [format:contact][data:...][/format]");
+            promptBuilder.AppendLine("- For all other questions, use regular text format");
+            promptBuilder.AppendLine("- Do not include contact form unless specifically requested");
 
+ 
+            promptBuilder.AppendLine("CONTACT FORM INSTRUCTIONS:");
+            promptBuilder.AppendLine("- When the user asks about contact information, ALWAYS include the contact form");
+            promptBuilder.AppendLine("- Include contact form for questions like: 'how to contact', 'get in touch', 'reach out', etc.");
+
+            promptBuilder.AppendLine("RESPOND STRICTLY TO WHAT THE USER ASKS...BUT IN A HUMAN AND CREATIVE WAY, ALSO STRUCTURE YOUR RERSPONSE");
 
             // Add style instructions based on the specified style
             promptBuilder.AppendLine("\n" + GetStyleInstruction(style));
@@ -308,7 +246,7 @@ namespace Portfolio_server.Services
         {
             return style.ToUpper() switch
             {
-                "FORMAL" => "Respond in a formal, professional tone. Use proper grammar and avoid contractions or colloquialisms. Structure your responses clearly with proper paragraphs.",
+                "FORMAL" => "Respond in a formal, professional tone. Use proper grammar and avoid contractions or colloquialisms. Structure your responses clearly with proper paragraphs, while feeling human.",
                 "EXPLANATORY" => "Respond in a teaching style that explains concepts thoroughly. Use examples where appropriate and break down complex ideas into simpler components. Number your points when listing multiple items.",
                 "MINIMALIST" => "Respond with brevity. Keep answers concise and to the point. Avoid unnecessary elaboration and focus on delivering essential information only.",
                 "HR" => "Respond in a warm, professional tone suitable for HR or recruitment conversations. Emphasize professional achievements, soft skills, and culture fit aspects.",
