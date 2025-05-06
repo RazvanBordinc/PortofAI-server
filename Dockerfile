@@ -15,12 +15,13 @@ COPY --from=publish /app/publish .
 # Install curl for healthcheck
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# Make sure to listen on all interfaces
-ENV ASPNETCORE_URLS=http://+:80
+# Environment variables - PORT is provided by Render
+ENV PORT=10000
+ENV ASPNETCORE_URLS=http://+:${PORT}
 
-# Health check
+# Health check - using the PORT environment variable
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost/api/health || exit 1
+    CMD curl -f http://localhost:${PORT}/api/health || exit 1
 
-EXPOSE 80
+EXPOSE ${PORT}
 ENTRYPOINT ["dotnet", "Portfolio-server.dll"]
