@@ -23,24 +23,53 @@ builder.Services.AddHostedService<GitHubDataFetcherService>();
 // Redis connection configuration
 try
 {
+    // For Upstash Redis specifically, use this approach
+    var redisConnectionString = builder.Configuration.GetConnectionString("Redis") ?? "redis:6379";
+    Console.WriteLine($"Attempting to connect to Redis at {redisConnectionString}");
+    
     var options = new ConfigurationOptions
     {
-        AbortOnConnectFail = false, // Don't abort if connection fails initially
-        ConnectTimeout = 10000, // Increase timeout to 10 seconds
-        ConnectRetry = 5, // Increase retry attempts
-        SyncTimeout = 10000, // Increase sync timeout
-        Password = builder.Configuration.GetConnectionString("RedisPassword") ?? "VeryPasswordStrongIs2",
-        AllowAdmin = true // Enable admin commands if needed
+        AbortOnConnectFail = false,
+        ConnectTimeout = 15000,      // Increase to 15 seconds
+        ConnectRetry = 5,
+        SyncTimeout = 15000,         // Increase to 15 seconds
+        AsyncTimeout = 15000,        // Add this for async operations
+        ReconnectRetryPolicy = new ExponentialRetry(5000), // Add exponential backoff
+        ResponseTimeout = 15000,     // Add response timeout
+        Ssl = true,                  // IMPORTANT: Enable SSL for Upstash
+        AllowAdmin = false           // Typically not needed and may cause issues
     };
-
-    // Parse the connection string
-    var redisHost = builder.Configuration.GetConnectionString("Redis") ?? "redis:6379";
-    foreach (var endpoint in redisHost.Split(','))
+    
+    // Use this approach for Upstash Redis instead of your current parsing
+    if (redisConnectionString.Contains("upstash.io"))
     {
-        options.EndPoints.Add(endpoint.Trim());
+        // For Upstash, we need to handle the connection string differently
+        var parts = redisConnectionString.Split(',');
+        var endpoint = parts[0]; // host:port
+        
+        options.EndPoints.Add(endpoint);
+        
+        // Extract password from connection string if present
+        foreach (var part in parts)
+        {
+            if (part.StartsWith("password="))
+            {
+                options.Password = part.Substring("password=".Length);
+            }
+        }
     }
-
-    Console.WriteLine($"Attempting to connect to Redis at {redisHost}");
+    else
+    {
+        // Your existing code for non-Upstash Redis
+        foreach (var endpoint in redisConnectionString.Split(','))
+        {
+            if (!endpoint.Contains("password="))
+                options.EndPoints.Add(endpoint.Trim());
+        }
+        
+        // Use the separate password setting if not in connection string
+        options.Password = builder.Configuration.GetConnectionString("RedisPassword") ?? "VeryPasswordStrongIs2";
+    }
 
     var redis = ConnectionMultiplexer.Connect(options);
     builder.Services.AddSingleton<IConnectionMultiplexer>(redis);

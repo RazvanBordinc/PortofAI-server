@@ -17,6 +17,7 @@ namespace Portfolio_server.Services
         private readonly HttpClient _httpClient;
         private Timer _timer;
         private const string PortfolioDataKey = "portfolio:me:txt";
+        private const int MaxRetries = 5;
 
         public GitHubDataFetcherService(
             ILogger<GitHubDataFetcherService> logger,
@@ -33,21 +34,37 @@ namespace Portfolio_server.Services
         {
             _logger.LogInformation("GitHub Data Fetcher Service is starting");
 
-            // Run immediately on startup
-            await FetchAndUpdateDataAsync();
+            try 
+            {
+                // Run immediately on startup, but with a delay to ensure Redis is ready
+                // This is especially important after Render wakes from sleep
+                await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken);
+                await FetchAndUpdateDataAsync();
 
-            // Schedule to run daily at midnight
-            var now = DateTime.Now;
-            var midnight = DateTime.Today.AddDays(1); // Next midnight
-            var timeToMidnight = midnight - now;
+                // Schedule to run daily at midnight
+                var now = DateTime.Now;
+                var midnight = DateTime.Today.AddDays(1); // Next midnight
+                var timeToMidnight = midnight - now;
 
-            _timer = new Timer(
-                async _ => await FetchAndUpdateDataAsync(),
-                null,
-                timeToMidnight,
-                TimeSpan.FromDays(1)); // Repeat every 24 hours
+                _timer = new Timer(
+                    async _ => await FetchAndUpdateDataAsync(),
+                    null,
+                    timeToMidnight,
+                    TimeSpan.FromDays(1)); // Repeat every 24 hours
 
-            _logger.LogInformation($"Next scheduled run: {midnight}");
+                _logger.LogInformation($"Next scheduled run: {midnight}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error starting GitHubDataFetcherService");
+                
+                // Reschedule even if there was an error, but sooner (1 hour)
+                _timer = new Timer(
+                    async _ => await FetchAndUpdateDataAsync(),
+                    null,
+                    TimeSpan.FromHours(1),
+                    TimeSpan.FromDays(1));
+            }
         }
 
         private async Task FetchAndUpdateDataAsync()
@@ -72,36 +89,75 @@ namespace Portfolio_server.Services
 
                 _logger.LogInformation($"Successfully fetched me.txt content from GitHub ({content.Length} characters)");
 
-                // Update Redis with fetched data
-                await UpdateRedisAsync(content);
+                // Update Redis with fetched data (with retries)
+                await UpdateRedisWithRetryAsync(content);
+            }
+            catch (HttpRequestException ex)
+            {
+                _logger.LogError(ex, "Error fetching data from GitHub. Will retry later.");
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error fetching or processing data from GitHub");
+                _logger.LogError(ex, "Unexpected error in GitHub data fetcher");
             }
         }
 
-        private async Task UpdateRedisAsync(string content)
+        private async Task UpdateRedisWithRetryAsync(string content)
         {
-            try
+            int retryCount = 0;
+            TimeSpan delay = TimeSpan.FromSeconds(2);
+            bool success = false;
+
+            while (retryCount < MaxRetries && !success)
             {
-                _logger.LogInformation("Updating Redis with me.txt content...");
+                try
+                {
+                    using var scope = _serviceProvider.CreateScope();
+                    var redis = scope.ServiceProvider.GetRequiredService<IConnectionMultiplexer>();
+                    
+                    // Check Redis connection state
+                    if (!redis.IsConnected)
+                    {
+                        _logger.LogWarning("Redis is not connected. Attempting to reconnect...");
+                        await Task.Delay(delay);
+                        retryCount++;
+                        delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2)); // Exponential backoff with 30s cap
+                        continue;
+                    }
 
-                using var scope = _serviceProvider.CreateScope();
-                var redis = scope.ServiceProvider.GetRequiredService<IConnectionMultiplexer>();
-                var db = redis.GetDatabase();
+                    var db = redis.GetDatabase();
 
-                // Store the me.txt content directly
-                await db.StringSetAsync(PortfolioDataKey, content);
+                    // Set operation timeout to handle potential connection issues
+                    var options = new CommandFlags[] { CommandFlags.DemandMaster };
+                    
+                    // Store the me.txt content directly
+                    await db.StringSetAsync(PortfolioDataKey, content, flags: options[0]);
 
-                // Set an expiration for the data (30 days)
-                await db.KeyExpireAsync(PortfolioDataKey, TimeSpan.FromDays(30));
+                    // Set an expiration for the data (30 days)
+                    await db.KeyExpireAsync(PortfolioDataKey, TimeSpan.FromDays(30), flags: options[0]);
 
-                _logger.LogInformation("Redis update completed successfully");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error updating Redis with me.txt data");
+                    _logger.LogInformation("Redis update completed successfully");
+                    success = true;
+                }
+                catch (RedisConnectionException redisEx)
+                {
+                    retryCount++;
+                    _logger.LogWarning($"Redis connection attempt {retryCount}/{MaxRetries} failed: {redisEx.Message}");
+                    
+                    if (retryCount >= MaxRetries)
+                    {
+                        _logger.LogError(redisEx, "Failed to update Redis after maximum retry attempts");
+                        throw;
+                    }
+                    
+                    await Task.Delay(delay);
+                    delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2)); // Exponential backoff with 30s cap
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Error updating Redis with me.txt data");
+                    throw;
+                }
             }
         }
 
