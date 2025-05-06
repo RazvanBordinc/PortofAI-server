@@ -3,11 +3,19 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using StackExchange.Redis;
 using System;
+using System.Net;
 using Portfolio_server.Services;
 using Portfolio_server.Models;
 
-
 var builder = WebApplication.CreateBuilder(args);
+
+// Configure Kestrel to use Render's PORT environment variable
+var port = Environment.GetEnvironmentVariable("PORT") ?? "10000";
+Console.WriteLine($"Configuring server to listen on port {port}");
+builder.WebHost.ConfigureKestrel(serverOptions =>
+{
+    serverOptions.Listen(IPAddress.Parse("0.0.0.0"), int.Parse(port));
+});
 
 // Add services to the container
 builder.Services.AddControllers();
@@ -30,17 +38,16 @@ try
     var options = new ConfigurationOptions
     {
         AbortOnConnectFail = false,
-        ConnectTimeout = 15000,      // Increase to 15 seconds
+        ConnectTimeout = 15000,      // 15 seconds
         ConnectRetry = 5,
-        SyncTimeout = 15000,         // Increase to 15 seconds
-        AsyncTimeout = 15000,        // Add this for async operations
+        SyncTimeout = 15000,         // 15 seconds
+        AsyncTimeout = 15000,        // 15 seconds for async operations
         ReconnectRetryPolicy = new ExponentialRetry(5000), // Add exponential backoff
-        ResponseTimeout = 15000,     // Add response timeout
-        Ssl = true,                  // IMPORTANT: Enable SSL for Upstash
-        AllowAdmin = false           // Typically not needed and may cause issues
+        Ssl = true,                  // Enable SSL for Upstash
+        AllowAdmin = false           // Not needed and may cause issues
     };
     
-    // Use this approach for Upstash Redis instead of your current parsing
+    // Use this approach for Upstash Redis
     if (redisConnectionString.Contains("upstash.io"))
     {
         // For Upstash, we need to handle the connection string differently
@@ -60,7 +67,7 @@ try
     }
     else
     {
-        // Your existing code for non-Upstash Redis
+        // For non-Upstash Redis
         foreach (var endpoint in redisConnectionString.Split(','))
         {
             if (!endpoint.Contains("password="))
@@ -130,6 +137,7 @@ builder.Services.AddCors(options =>
         var allowedOrigins = builder.Configuration["AllowedOrigins"]?.Split(",")
             ?? new[] { "http://localhost:3000" };
 
+        Console.WriteLine($"CORS configured with origins: {string.Join(", ", allowedOrigins)}");
         policy.WithOrigins(allowedOrigins)
               .AllowAnyMethod()
               .AllowAnyHeader()
@@ -139,6 +147,9 @@ builder.Services.AddCors(options =>
 });
 
 var app = builder.Build();
+
+// Log configured URLs
+Console.WriteLine($"Server configured with URLs: {string.Join(", ", app.Urls)}");
 
 // Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment() || app.Environment.IsProduction())
@@ -156,12 +167,16 @@ else
 // Use CORS before any other middleware that might return responses
 app.UseCors("AllowFrontend");
 
-app.UseHttpsRedirection();
+// No need for UseHttpsRedirection in Render as they handle SSL termination
+// app.UseHttpsRedirection();
+
 app.UseAuthorization();
 app.MapControllers();
 
 // Add a minimal endpoint for testing connectivity
+app.MapGet("/", () => "PortofAI Server is running");
 app.MapGet("/api/ping", () => new { message = "pong", timestamp = DateTime.UtcNow });
+ 
 
 Console.WriteLine("Application startup complete. Listening for requests...");
 
