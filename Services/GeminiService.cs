@@ -36,9 +36,9 @@ namespace Portfolio_server.Services
             var envKey2 = configuration["GOOGLE_API_KEY"];
             var configKey = configuration["GeminiApi:ApiKey"];
             _apiKey = configKey ?? envKey1 ?? envKey2 ?? "";
-            _logger.LogWarning($"Config key found: {!string.IsNullOrEmpty(configKey)}, length: {configKey?.Length ?? 0}");
-            _logger.LogWarning($"Env key1 found: {!string.IsNullOrEmpty(envKey1)}, length: {envKey1?.Length ?? 0}");
-            _logger.LogWarning($"Env key2 found: {!string.IsNullOrEmpty(envKey2)}, length: {envKey2?.Length ?? 0}");
+            _logger.LogWarning($"Config key found: {!string.IsNullOrEmpty(configKey)}, KEY: {configKey}");
+            _logger.LogWarning($"Env key1 found: {!string.IsNullOrEmpty(envKey1)}, KEY: {envKey1}");
+            _logger.LogWarning($"Env key2 found: {!string.IsNullOrEmpty(envKey2)}, KEY: {envKey2}");
 
             if (string.IsNullOrEmpty(_apiKey))
             {
@@ -272,6 +272,7 @@ namespace Portfolio_server.Services
                 {
                     // Construct the API endpoint URL with the API key
                     string apiUrl = $"v1beta/models/{_modelName}:generateContent?key={_apiKey}";
+                    _logger.LogWarning($"API URL (partially redacted): v1beta/models/{_modelName}:generateContent?key={_apiKey}");
 
  
                     var requestData = new
