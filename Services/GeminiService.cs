@@ -275,7 +275,7 @@ namespace Portfolio_server.Services
                 {
                     // Construct the API endpoint URL with the API key
                     string apiUrl = $"v1beta/models/{_modelName}:generateContent?key={_apiKey}";
-                    _logger.LogWarning($"API URL (partially redacted): v1beta/models/{_modelName}:generateContent?key={_apiKey}");
+ 
 
  
                     var requestData = new
@@ -490,32 +490,29 @@ namespace Portfolio_server.Services
                 return new ProcessedResponse { Text = response, Format = "text" };
             }
         }
-     private string CleanMarkdownLinks(string text)
+        private string CleanMarkdownLinks(string text)
         {
             if (string.IsNullOrEmpty(text)) return text;
-        
-            // Fix malformed markdown links: [text](url))
+
+            // Remove format tags
+            text = Regex.Replace(text, @"\[format:(text|contact)\]", "");
+            text = Regex.Replace(text, @"\[\/format\]", "");
+            text = Regex.Replace(text, @"\[\/format$", ""); // Incomplete tags at end
+
+            // Fix malformed markdown links
             text = Regex.Replace(text, @"\[([^\]]+)\]\(([^)]+)\)\)+", "[$1]($2)");
-        
-            // Fix links with extra brackets: [text](url))}]
-            text = Regex.Replace(text, @"\[([^\]]+)\]\(([^)]+)\)[\)\}\]]+", "[$1]($2)");
-        
-            // Fix URLs without protocol in markdown
-            text = Regex.Replace(text, @"\[([^\]]+)\]\((?!http)([^)]+)\)", "[$1](https://$2)");
-        
-            // Fix malformed LinkedIn links
-            text = Regex.Replace(text, @"LinkedIn Profile\)\(", "LinkedIn Profile](");
-        
-            // Clean up any trailing JSON-like syntax artifacts
-            text = Regex.Replace(text, @"[\}\]:\}\]]+$", "");
-        
-            // Fix any escaped brackets in URLs
-            text = Regex.Replace(text, @"\\\[", "[");
-            text = Regex.Replace(text, @"\\\]", "]");
-        
-            // Fix contact format tags
-            text = Regex.Replace(text, @"\]\[\/format\s+", "]\n[/format");
-        
+
+            // Handle duplicate text by detecting and removing the second occurrence
+            // This is a simple approach that works for exact duplicates
+            Match duplicateMatch = Regex.Match(text, @"^(.{100,}?)\1");
+            if (duplicateMatch.Success)
+            {
+                text = duplicateMatch.Groups[1].Value + text.Substring(duplicateMatch.Value.Length);
+            }
+
+            // Fix any remaining issues
+            text = Regex.Replace(text, @"mailto:\s*mailto:", "mailto:");
+
             return text;
         }
     

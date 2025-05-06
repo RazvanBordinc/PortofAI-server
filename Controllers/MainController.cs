@@ -164,22 +164,23 @@ namespace Portfolio_server.Controllers
 
                     // Call the streaming version of the service
                     string fullResponse = await _geminiService.StreamMessageAsync(
-                          enrichedMessage,
-                          sessionId,
-                          request.Style ?? "NORMAL",
-                          async (chunk) =>
-                          {
-                              // Add to full response
-                              responseBuilder.Append(chunk);
-
-                              // Write chunk to client
-                              await WriteChunkAsync(chunk);
-
-                              // Send heartbeat after each chunk to keep connection alive
-                              await WriteHeartbeatAsync();
-                          },
-                          linkedCts.Token
-                      );
+                        enrichedMessage,
+                        sessionId,
+                        request.Style ?? "NORMAL",
+                        async (chunk) => {
+                            // Add to full response - ONLY if it's not already there
+                            if (!responseBuilder.ToString().Contains(chunk)) {
+                                responseBuilder.Append(chunk);
+                            }
+                            
+                            // Write chunk to client
+                            await WriteChunkAsync(chunk);
+                            
+                            // Send heartbeat after each chunk to keep connection alive
+                            await WriteHeartbeatAsync();
+                        },
+                        linkedCts.Token
+                    );
 
                     // If the fullResponse is empty but we accumulated chunks, use those instead
                     if (string.IsNullOrEmpty(fullResponse) && responseBuilder.Length > 0)
