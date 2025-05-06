@@ -148,6 +148,7 @@ namespace Portfolio_server.Services
                     fullResponse = CleanMarkdownLinks(fullResponse);
                     if (!string.IsNullOrEmpty(fullResponse))
                     {
+                     _logger.LogDebug($"Cleaned full response before removing duplicate: {fullResponse} \n\n");
                         fullResponse = RemoveDuplicatedText(fullResponse);
                     }
                     // For successful responses, simulate streaming by chunking
@@ -470,28 +471,54 @@ namespace Portfolio_server.Services
         }
         private string RemoveDuplicatedText(string text)
         {
-            if (string.IsNullOrEmpty(text) || text.Length < 20)
+            // Safety check for null or short texts
+            if (string.IsNullOrEmpty(text) || text.Length < 40)
                 return text;
 
-            // Check if text is exactly duplicated (common pattern)
-            int halfLength = text.Length / 2;
-            string firstHalf = text.Substring(0, halfLength);
-            string secondHalf = text.Substring(halfLength);
-
-            if (firstHalf.Equals(secondHalf))
-                return firstHalf;
-
-            // Check for approximate duplication (more flexible)
-            for (int i = 20; i < text.Length / 2; i++)
+            try
             {
-                string pattern = text.Substring(0, i);
-                if (text.Substring(i, i).Equals(pattern))
-                {
-                    return pattern + text.Substring(i * 2);
-                }
-            }
+                // Exact duplication check - when text is repeated exactly once
+                int halfLength = text.Length / 2;
+                string firstHalf = text.Substring(0, halfLength);
+                string secondHalf = text.Substring(halfLength);
 
-            return text;
+                if (firstHalf.Equals(secondHalf, StringComparison.Ordinal))
+                {
+                    _logger.LogInformation("Detected exact text duplication, using first half only");
+                    return firstHalf;
+                }
+
+                // Look for large duplicate sections (at least 25 characters long)
+                for (int length = Math.Min(200, text.Length / 2); length >= 25; length--)
+                {
+                    for (int start = 0; start <= text.Length - length * 2; start++)
+                    {
+                        string pattern = text.Substring(start, length);
+
+                        // Look for this pattern in the rest of the text
+                        int matchPos = text.IndexOf(pattern, start + length, StringComparison.Ordinal);
+                        if (matchPos > 0)
+                        {
+                            // Verify it's a significant duplication, not just common phrases
+                            if (matchPos == start + length) // Check if pattern appears immediately after itself
+                            {
+                                _logger.LogInformation($"Found duplicate pattern of length {length} at position {start}");
+                                // Remove the second occurrence
+                                return text.Substring(0, matchPos) + text.Substring(matchPos + length);
+                            }
+                        }
+                    }
+                }
+
+                // No significant duplication found
+                return text;
+            }
+            catch (Exception ex)
+            {
+                // Log error but don't modify text if something goes wrong
+                _logger.LogError(ex, "Error in RemoveDuplicatedText, returning original text");
+                return text;
+            }
         }
         private ProcessedResponse ProcessResponse(string response)
         {
