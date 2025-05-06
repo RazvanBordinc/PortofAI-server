@@ -31,14 +31,17 @@ namespace Portfolio_server.Services
             _httpClient = httpClient;
             _conversationService = conversationService;
 
-            // Get API key
-            var envKey1 = Environment.GetEnvironmentVariable("GOOGLE_API_KEY");
-            var envKey2 = configuration["GOOGLE_API_KEY"];
-            var configKey = configuration["GeminiApi:ApiKey"];
-            _apiKey = configKey ?? envKey1 ?? envKey2 ?? "";
-            _logger.LogWarning($"Config key found: {!string.IsNullOrEmpty(configKey)}, KEY: {configKey}");
-            _logger.LogWarning($"Env key1 found: {!string.IsNullOrEmpty(envKey1)}, KEY: {envKey1}");
-            _logger.LogWarning($"Env key2 found: {!string.IsNullOrEmpty(envKey2)}, KEY: {envKey2}");
+        // Get API key
+        var envKey1 = Environment.GetEnvironmentVariable("GOOGLE_API_KEY");
+        var envKey2 = configuration["GOOGLE_API_KEY"];
+        var configKey = configuration["GeminiApi:ApiKey"];
+
+        // Check if configKey is the placeholder and avoid using it if so
+        if (configKey == "YOUR_GEMINI_API_KEY") {
+            configKey = null; // Ignore the placeholder value
+        }
+
+        _apiKey = envKey1 ?? envKey2 ?? configKey ?? "";
 
             if (string.IsNullOrEmpty(_apiKey))
             {
