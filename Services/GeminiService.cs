@@ -490,23 +490,32 @@ namespace Portfolio_server.Services
                 return new ProcessedResponse { Text = response, Format = "text" };
             }
         }
-        private string CleanMarkdownLinks(string text)
+     private string CleanMarkdownLinks(string text)
         {
             if (string.IsNullOrEmpty(text)) return text;
-
+        
             // Fix malformed markdown links: [text](url))
             text = Regex.Replace(text, @"\[([^\]]+)\]\(([^)]+)\)\)+", "[$1]($2)");
-
+        
             // Fix links with extra brackets: [text](url))}]
             text = Regex.Replace(text, @"\[([^\]]+)\]\(([^)]+)\)[\)\}\]]+", "[$1]($2)");
-
+        
+            // Fix URLs without protocol in markdown
+            text = Regex.Replace(text, @"\[([^\]]+)\]\((?!http)([^)]+)\)", "[$1](https://$2)");
+        
+            // Fix malformed LinkedIn links
+            text = Regex.Replace(text, @"LinkedIn Profile\)\(", "LinkedIn Profile](");
+        
             // Clean up any trailing JSON-like syntax artifacts
             text = Regex.Replace(text, @"[\}\]:\}\]]+$", "");
-
+        
             // Fix any escaped brackets in URLs
             text = Regex.Replace(text, @"\\\[", "[");
             text = Regex.Replace(text, @"\\\]", "]");
-
+        
+            // Fix contact format tags
+            text = Regex.Replace(text, @"\]\[\/format\s+", "]\n[/format");
+        
             return text;
         }
     
