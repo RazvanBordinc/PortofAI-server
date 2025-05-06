@@ -322,7 +322,7 @@ namespace Portfolio_server.Controllers
                     return StatusCode(429, new
                     {
                         message = "You've reached the maximum number of contact requests. Please try again later or contact me directly via email.",
-                        contactEmail = "razvan.bordinc@yahoo.com",
+                        contactEmail = "bordincrazvan2004@gmail.com",
                         success = false
                     });
                 }
@@ -335,7 +335,7 @@ namespace Portfolio_server.Controllers
                 return StatusCode(500, new
                 {
                     message = "There was an issue processing your message. Please try again or contact me directly via email.",
-                    contactEmail = "razvan.bordinc@yahoo.com",
+                    contactEmail = "bordincrazvan2004@gmail.com",
                     success = false
                 });
             }

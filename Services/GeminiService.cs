@@ -146,7 +146,10 @@ namespace Portfolio_server.Services
 
                     // Clean full response to fix any formatting issues before streaming
                     fullResponse = CleanMarkdownLinks(fullResponse);
-
+                    if (!string.IsNullOrEmpty(fullResponse))
+                    {
+                        fullResponse = RemoveDuplicatedText(fullResponse);
+                    }
                     // For successful responses, simulate streaming by chunking
                     int chunkSize = 25; // Characters per chunk
 
@@ -184,7 +187,7 @@ namespace Portfolio_server.Services
                         "This is likely a temporary problem.\n\n" +
                         "While I can't answer your specific question right now, you can:\n\n" +
                         "1. Try again in a few minutes\n" +
-                        "2. Contact Razvan directly at **razvan.bordinc@yahoo.com**\n" +
+                        "2. Contact Razvan directly at **bordincrazvan2004@gmail.com**\n" +
                         "3. Visit the GitHub profile at https://github.com/RazvanBordinc\n\n" +
                         "Error details: " + httpEx.Message;
 
@@ -198,7 +201,7 @@ namespace Portfolio_server.Services
 
                 // Create a fallback response with properly formatted text to test styling
                 string fallbackResponse = "I'm sorry, I encountered a technical issue and couldn't process your request.\n\n" +
-                    "In the meantime, you can contact me directly at razvan.bordinc@yahoo.com or check out my GitHub at https://github.com/RazvanBordinc.\n\n" +
+                    "In the meantime, you can contact me directly at bordincrazvan2004@gmail.com or check out my GitHub at https://github.com/RazvanBordinc.\n\n" +
                     "Try again later when the service is available.";
 
                 // Send the fallback response as a chunk
@@ -345,7 +348,7 @@ namespace Portfolio_server.Services
                             }
 
                             // If we've reached max retries, return a friendly error message
-                            return $"I'm sorry, but the AI service is currently experiencing high traffic. Please try again in a few moments.\n\nIn the meantime, you can contact me directly at razvan.bordinc@yahoo.com or check out my GitHub at https://github.com/RazvanBordinc.\n\nError details: {response.StatusCode} after {maxRetries} attempts.";
+                            return $"I'm sorry, but the AI service is currently experiencing high traffic. Please try again in a few moments.\n\nIn the meantime, you can contact me directly at bordincrazvan2004@gmail.com or check out my GitHub at https://github.com/RazvanBordinc.\n\nError details: {response.StatusCode} after {maxRetries} attempts.";
                         }
 
                         // Handle other error cases with appropriate messages
@@ -465,7 +468,31 @@ namespace Portfolio_server.Services
                 }
             }
         }
+        private string RemoveDuplicatedText(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.Length < 20)
+                return text;
 
+            // Check if text is exactly duplicated (common pattern)
+            int halfLength = text.Length / 2;
+            string firstHalf = text.Substring(0, halfLength);
+            string secondHalf = text.Substring(halfLength);
+
+            if (firstHalf.Equals(secondHalf))
+                return firstHalf;
+
+            // Check for approximate duplication (more flexible)
+            for (int i = 20; i < text.Length / 2; i++)
+            {
+                string pattern = text.Substring(0, i);
+                if (text.Substring(i, i).Equals(pattern))
+                {
+                    return pattern + text.Substring(i * 2);
+                }
+            }
+
+            return text;
+        }
         private ProcessedResponse ProcessResponse(string response)
         {
             try
