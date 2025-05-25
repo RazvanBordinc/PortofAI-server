@@ -144,13 +144,8 @@ namespace Portfolio_server.Services
                         return fullResponse;
                     }
 
-                    // Clean full response to fix any formatting issues before streaming
-                    fullResponse = CleanMarkdownLinks(fullResponse);
-                    if (!string.IsNullOrEmpty(fullResponse))
-                    {
-                     _logger.LogDebug($"Cleaned full response before removing duplicate: {fullResponse} \n\n");
-                        fullResponse = RemoveDuplicatedText(fullResponse);
-                    }
+                    // Clean full response only once before streaming
+                    fullResponse = CleanAndDeduplicateText(fullResponse);
                     // For successful responses, simulate streaming by chunking
                     int chunkSize = 25; // Characters per chunk
 
@@ -164,8 +159,7 @@ namespace Portfolio_server.Services
                         int remainingLength = Math.Min(chunkSize, fullResponse.Length - i);
                         string chunk = fullResponse.Substring(i, remainingLength);
 
-                        // Clean the chunk before sending
-                        chunk = CleanMarkdownLinks(chunk);
+                        // Don't clean chunks - already cleaned the full response
 
                         // Send chunk to client
                         await onChunkReceived(chunk);
@@ -176,8 +170,8 @@ namespace Portfolio_server.Services
 
                    
 
-                    // One final cleaning pass to ensure the complete response is well-formatted
-                    return CleanMarkdownLinks(fullResponse);
+                    // Return the already cleaned response
+                    return fullResponse;
                 }
                 catch (HttpRequestException httpEx)
                 {
@@ -396,8 +390,8 @@ namespace Portfolio_server.Services
                                         string text = textElement.GetString();
                                         if (!string.IsNullOrEmpty(text))
                                         {
-                                            // Clean the text before returning
-                                            return CleanMarkdownLinks(text);
+                                            // Return text as-is, will be cleaned once in StreamMessageAsync
+                                            return text;
                                         }
                                     }
                                 }
@@ -477,41 +471,58 @@ namespace Portfolio_server.Services
 
             try
             {
-                // Exact duplication check - when text is repeated exactly once
+                // First check: Exact duplication - when entire text is repeated
                 int halfLength = text.Length / 2;
-                string firstHalf = text.Substring(0, halfLength);
-                string secondHalf = text.Substring(halfLength);
-
-                if (firstHalf.Equals(secondHalf, StringComparison.Ordinal))
+                if (text.Length % 2 == 0)
                 {
-                    _logger.LogInformation("Detected exact text duplication, using first half only");
-                    return firstHalf;
-                }
+                    string firstHalf = text.Substring(0, halfLength);
+                    string secondHalf = text.Substring(halfLength);
 
-                // Look for large duplicate sections (at least 25 characters long)
-                for (int length = Math.Min(200, text.Length / 2); length >= 25; length--)
-                {
-                    for (int start = 0; start <= text.Length - length * 2; start++)
+                    if (firstHalf.Equals(secondHalf, StringComparison.Ordinal))
                     {
-                        string pattern = text.Substring(start, length);
-
-                        // Look for this pattern in the rest of the text
-                        int matchPos = text.IndexOf(pattern, start + length, StringComparison.Ordinal);
-                        if (matchPos > 0)
-                        {
-                            // Verify it's a significant duplication, not just common phrases
-                            if (matchPos == start + length) // Check if pattern appears immediately after itself
-                            {
-                                _logger.LogInformation($"Found duplicate pattern of length {length} at position {start}");
-                                // Remove the second occurrence
-                                return text.Substring(0, matchPos) + text.Substring(matchPos + length);
-                            }
-                        }
+                        _logger.LogInformation("Detected exact text duplication, using first half only");
+                        return firstHalf;
                     }
                 }
 
-                // No significant duplication found
-                return text;
+                // Second check: Sentence-level deduplication
+                string[] sentences = Regex.Split(text, @"(?<=[.!?])\s+");
+                var uniqueSentences = new List<string>();
+                var seenSentences = new HashSet<string>();
+
+                foreach (var sentence in sentences)
+                {
+                    string trimmed = sentence.Trim();
+                    if (trimmed.Length > 10 && !seenSentences.Contains(trimmed))
+                    {
+                        seenSentences.Add(trimmed);
+                        uniqueSentences.Add(sentence);
+                    }
+                    else if (trimmed.Length <= 10)
+                    {
+                        // Keep short sentences/fragments
+                        uniqueSentences.Add(sentence);
+                    }
+                }
+
+                string deduplicatedText = string.Join(" ", uniqueSentences);
+                
+                // Third check: Paragraph-level deduplication
+                string[] paragraphs = deduplicatedText.Split(new[] { "\n\n" }, StringSplitOptions.RemoveEmptyEntries);
+                var uniqueParagraphs = new List<string>();
+                var seenParagraphs = new HashSet<string>();
+
+                foreach (var paragraph in paragraphs)
+                {
+                    string trimmedPara = paragraph.Trim();
+                    if (!seenParagraphs.Contains(trimmedPara))
+                    {
+                        seenParagraphs.Add(trimmedPara);
+                        uniqueParagraphs.Add(paragraph);
+                    }
+                }
+
+                return string.Join("\n\n", uniqueParagraphs);
             }
             catch (Exception ex)
             {
@@ -544,6 +555,19 @@ namespace Portfolio_server.Services
                 return new ProcessedResponse { Text = response, Format = "text" };
             }
         }
+        private string CleanAndDeduplicateText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+
+            // First, remove any exact duplications
+            text = RemoveDuplicatedText(text);
+            
+            // Then clean markdown and format tags
+            text = CleanMarkdownLinks(text);
+            
+            return text;
+        }
+        
         private string CleanMarkdownLinks(string text)
         {
             if (string.IsNullOrEmpty(text)) return text;
@@ -555,15 +579,7 @@ namespace Portfolio_server.Services
 
             // Fix malformed markdown links
             text = Regex.Replace(text, @"\[([^\]]+)\]\(([^)]+)\)\)+", "[$1]($2)");
-
-            // Handle duplicate text by detecting and removing the second occurrence
-            // This is a simple approach that works for exact duplicates
-            Match duplicateMatch = Regex.Match(text, @"^(.{100,}?)\1");
-            if (duplicateMatch.Success)
-            {
-                text = duplicateMatch.Groups[1].Value + text.Substring(duplicateMatch.Value.Length);
-            }
-
+            
             // Fix any remaining issues
             text = Regex.Replace(text, @"mailto:\s*mailto:", "mailto:");
 

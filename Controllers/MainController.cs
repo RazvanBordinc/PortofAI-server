@@ -168,10 +168,8 @@ namespace Portfolio_server.Controllers
                         sessionId,
                         request.Style ?? "NORMAL",
                         async (chunk) => {
-                            // Add to full response - ONLY if it's not already there
-                            if (!responseBuilder.ToString().Contains(chunk)) {
-                                responseBuilder.Append(chunk);
-                            }
+                            // Add to full response
+                            responseBuilder.Append(chunk);
                             
                             // Write chunk to client
                             await WriteChunkAsync(chunk);
