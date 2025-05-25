@@ -53,7 +53,7 @@ namespace Portfolio_server.Services
             _logger.LogDebug($"API key configured with length: {_apiKey.Length}");
 
             // Get model name
-            _modelName = configuration["GeminiApi:ModelName"] ?? "gemini-2.0-flash";
+            _modelName = configuration["GeminiApi:ModelName"] ?? "gemini-2.5-flash-preview-04-17";
             _logger.LogDebug($"Using model: {_modelName}");
 
             // Configure JSON options
@@ -296,6 +296,10 @@ namespace Portfolio_server.Services
                             topP = 0.95,
                             maxOutputTokens = 8192,
                             stopSequences = Array.Empty<string>()
+                        },
+                        thinkingConfig = new
+                        {
+                            thinkingBudget = 0  // Disable thinking mode for faster responses
                         },
                         safetySettings = new[]
                         {
