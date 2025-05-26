@@ -50,11 +50,13 @@ namespace Portfolio_server.Services
             }
 
             // Reduced unnecessary logging
-            _logger.LogDebug($"API key configured with length: {_apiKey.Length}");
+            _logger.LogInformation($"[GeminiService] API key configured with length: {_apiKey.Length}");
+            _logger.LogInformation($"[GeminiService] API key first 10 chars: {_apiKey.Substring(0, Math.Min(10, _apiKey.Length))}...");
 
             // Get model name
-            _modelName = configuration["GeminiApi:ModelName"] ?? "gemini-2.5-flash-preview-04-17";
-            _logger.LogDebug($"Using model: {_modelName}");
+            _modelName = configuration["GeminiApi:ModelName"] ?? "gemini-2.0-flash";
+            _logger.LogInformation($"[GeminiService] Configured to use model: {_modelName}");
+            _logger.LogInformation($"[GeminiService] Base URL: {_httpClient.BaseAddress}");
 
             // Configure JSON options
             _jsonOptions = new JsonSerializerOptions
@@ -272,10 +274,13 @@ namespace Portfolio_server.Services
                 try
                 {
                     // Construct the API endpoint URL with the API key
-                    string apiUrl = $"v1beta/models/{_modelName}:generateContent?key={_apiKey}";
- 
+                    // Using v1 for stable models, v1beta for preview models
+                    string apiVersion = _modelName.Contains("preview") ? "v1beta" : "v1";
+                    string apiUrl = $"{apiVersion}/models/{_modelName}:generateContent?key={_apiKey}";
+                    
+                    _logger.LogInformation($"[Gemini API] Using model: {_modelName}");
+                    _logger.LogDebug($"[Gemini API] Full URL: {_httpClient.BaseAddress}{apiUrl}");
 
- 
                     var requestData = new
                     {
                         contents = new[]
@@ -297,10 +302,6 @@ namespace Portfolio_server.Services
                             maxOutputTokens = 8192,
                             stopSequences = Array.Empty<string>()
                         },
-                        thinkingConfig = new
-                        {
-                            thinkingBudget = 0  // Disable thinking mode for faster responses
-                        },
                         safetySettings = new[]
                         {
                     new { category = "HARM_CATEGORY_HARASSMENT", threshold = "BLOCK_MEDIUM_AND_ABOVE" },
@@ -312,6 +313,10 @@ namespace Portfolio_server.Services
 
                     // Serialize to JSON
                     string jsonContent = JsonSerializer.Serialize(requestData, _jsonOptions);
+                    
+                    _logger.LogDebug($"[Gemini API] Request JSON: {jsonContent}");
+                    _logger.LogInformation($"[Gemini API] Request size: {jsonContent.Length} characters");
+                    
                     var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
                     // Send the request with timeout - increase timeout for retry attempts
@@ -327,7 +332,10 @@ namespace Portfolio_server.Services
                     if (!response.IsSuccessStatusCode)
                     {
                         string errorMessage = await response.Content.ReadAsStringAsync();
-                        _logger.LogError($"Gemini API Error: Status {response.StatusCode}, Message: {errorMessage}");
+                        _logger.LogError($"[Gemini API] Error Response - Status: {response.StatusCode}");
+                        _logger.LogError($"[Gemini API] Error Body: {errorMessage}");
+                        _logger.LogError($"[Gemini API] Request URL: {apiUrl}");
+                        _logger.LogError($"[Gemini API] Model Name: {_modelName}");
 
                         // For 503 (service unavailable) or 429 (rate limit), retry with backoff
                         if ((int)response.StatusCode == 503 || (int)response.StatusCode == 429)
@@ -350,19 +358,41 @@ namespace Portfolio_server.Services
                             return $"I'm sorry, but the AI service is currently experiencing high traffic. Please try again in a few moments.\n\nIn the meantime, you can contact me directly at bordincrazvan2004@gmail.com or check out my GitHub at https://github.com/RazvanBordinc.\n\nError details: {response.StatusCode} after {maxRetries} attempts.";
                         }
 
+                        // Parse the error details for better debugging
+                        string detailedError = "Unknown error";
+                        try
+                        {
+                            var errorJson = JsonSerializer.Deserialize<JsonElement>(errorMessage);
+                            if (errorJson.TryGetProperty("error", out var errorProp))
+                            {
+                                if (errorProp.TryGetProperty("message", out var messageProp))
+                                {
+                                    detailedError = messageProp.GetString();
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            detailedError = errorMessage;
+                        }
+                        
+                        _logger.LogError($"[Gemini API] Detailed error: {detailedError}");
+                        
                         // Handle other error cases with appropriate messages
                         return (int)response.StatusCode switch
                         {
-                            400 => "I apologize, but there was an error with the request format. Please try again with a simpler message.",
+                            400 => $"I apologize, but there was an error with the request format. Technical details: {detailedError}",
                             401 or 403 => "I'm experiencing authentication issues with my AI service. This is likely a temporary problem with my API configuration.",
-                            404 => "The AI model endpoint couldn't be found. This is likely a temporary configuration issue.",
-                            _ => $"I'm having trouble connecting to my knowledge source right now. Please try again later. (Error: {response.StatusCode})"
+                            404 => $"The AI model endpoint couldn't be found. Model: {_modelName}. This might be due to an incorrect model name.",
+                            _ => $"I'm having trouble connecting to my knowledge source right now. Error: {response.StatusCode} - {detailedError}"
                         };
                     }
 
                     // Parse the response
                     string responseJson = await response.Content.ReadAsStringAsync();
-                    _logger.LogDebug($"Received response from Gemini API (length: {responseJson.Length})");
+                    _logger.LogInformation($"[Gemini API] Response received - Status: {response.StatusCode}");
+                    _logger.LogDebug($"[Gemini API] Response length: {responseJson.Length} characters");
+                    _logger.LogDebug($"[Gemini API] Response preview: {responseJson.Substring(0, Math.Min(500, responseJson.Length))}...");
 
                     try
                     {
