@@ -398,13 +398,6 @@ namespace Portfolio_server.Controllers
             return Ok(new { status = "healthy", timestamp = DateTime.UtcNow });
         }
 
-        // Ping endpoint for testing
-        [HttpGet("ping")]
-        [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
-        public IActionResult Ping()
-        {
-            return Ok(new { message = "pong", timestamp = DateTime.UtcNow });
-        }
 
         /// <summary>
         /// Gets the client IP address from request headers or connection info

@@ -134,8 +134,12 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
     {
-        var allowedOrigins = builder.Configuration["AllowedOrigins"]?.Split(",")
-            ?? new[] { "http://localhost:3000" };
+        // Get allowed origins from configuration or environment variable
+        var configOrigins = builder.Configuration["AllowedOrigins"]?.Split(",");
+        var envOrigins = Environment.GetEnvironmentVariable("ALLOWED_ORIGINS")?.Split(",");
+        
+        // Combine both sources and provide defaults
+        var allowedOrigins = configOrigins ?? envOrigins ?? new[] { "http://localhost:3000" };
 
         Console.WriteLine($"CORS configured with origins: {string.Join(", ", allowedOrigins)}");
         policy.WithOrigins(allowedOrigins)
@@ -164,22 +168,25 @@ else
     app.UseExceptionHandler("/error");
 }
 
+// Configure forwarded headers for proxy scenarios (Render, etc.)
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor | 
+                      Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto
+});
+
 // Use CORS before any other middleware that might return responses
 app.UseCors("AllowFrontend");
 
-// Enable HTTPS redirection for production
-if (!app.Environment.IsDevelopment())
-{
-    app.UseHttpsRedirection();
-}
+// Don't use HTTPS redirection on Render - they handle SSL termination at proxy level
+// This prevents redirect loops and SSL certificate issues
+// app.UseHttpsRedirection();
 
 app.UseAuthorization();
 app.MapControllers();
 
 // Add a minimal endpoint for testing connectivity
 app.MapGet("/", () => "PortofAI Server is running");
-app.MapGet("/api/ping", () => new { message = "pong", timestamp = DateTime.UtcNow });
-app.MapGet("/api/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
  
 
 Console.WriteLine("Application startup complete. Listening for requests...");
