@@ -50,13 +50,11 @@ namespace Portfolio_server.Services
             }
 
             // Reduced unnecessary logging
-            _logger.LogInformation($"[GeminiService] API key configured with length: {_apiKey.Length}");
-            _logger.LogInformation($"[GeminiService] API key first 10 chars: {_apiKey.Substring(0, Math.Min(10, _apiKey.Length))}...");
+            _logger.LogDebug($"API key configured with length: {_apiKey.Length}");
 
             // Get model name
             _modelName = configuration["GeminiApi:ModelName"] ?? "gemini-2.0-flash";
-            _logger.LogInformation($"[GeminiService] Configured to use model: {_modelName}");
-            _logger.LogInformation($"[GeminiService] Base URL: {_httpClient.BaseAddress}");
+            _logger.LogDebug($"Using model: {_modelName}");
 
             // Configure JSON options
             _jsonOptions = new JsonSerializerOptions
@@ -278,9 +276,6 @@ namespace Portfolio_server.Services
                     string apiVersion = _modelName.Contains("preview") ? "v1beta" : "v1";
                     string apiUrl = $"{apiVersion}/models/{_modelName}:generateContent?key={_apiKey}";
                     
-                    _logger.LogInformation($"[Gemini API] Using model: {_modelName}");
-                    _logger.LogDebug($"[Gemini API] Full URL: {_httpClient.BaseAddress}{apiUrl}");
-
                     var requestData = new
                     {
                         contents = new[]
@@ -313,10 +308,6 @@ namespace Portfolio_server.Services
 
                     // Serialize to JSON
                     string jsonContent = JsonSerializer.Serialize(requestData, _jsonOptions);
-                    
-                    _logger.LogDebug($"[Gemini API] Request JSON: {jsonContent}");
-                    _logger.LogInformation($"[Gemini API] Request size: {jsonContent.Length} characters");
-                    
                     var content = new StringContent(jsonContent, Encoding.UTF8, "application/json");
 
                     // Send the request with timeout - increase timeout for retry attempts
@@ -332,10 +323,7 @@ namespace Portfolio_server.Services
                     if (!response.IsSuccessStatusCode)
                     {
                         string errorMessage = await response.Content.ReadAsStringAsync();
-                        _logger.LogError($"[Gemini API] Error Response - Status: {response.StatusCode}");
-                        _logger.LogError($"[Gemini API] Error Body: {errorMessage}");
-                        _logger.LogError($"[Gemini API] Request URL: {apiUrl}");
-                        _logger.LogError($"[Gemini API] Model Name: {_modelName}");
+                        _logger.LogError($"Gemini API Error: Status {response.StatusCode}, Message: {errorMessage}");
 
                         // For 503 (service unavailable) or 429 (rate limit), retry with backoff
                         if ((int)response.StatusCode == 503 || (int)response.StatusCode == 429)
@@ -376,8 +364,6 @@ namespace Portfolio_server.Services
                             detailedError = errorMessage;
                         }
                         
-                        _logger.LogError($"[Gemini API] Detailed error: {detailedError}");
-                        
                         // Handle other error cases with appropriate messages
                         return (int)response.StatusCode switch
                         {
@@ -390,9 +376,7 @@ namespace Portfolio_server.Services
 
                     // Parse the response
                     string responseJson = await response.Content.ReadAsStringAsync();
-                    _logger.LogInformation($"[Gemini API] Response received - Status: {response.StatusCode}");
-                    _logger.LogDebug($"[Gemini API] Response length: {responseJson.Length} characters");
-                    _logger.LogDebug($"[Gemini API] Response preview: {responseJson.Substring(0, Math.Min(500, responseJson.Length))}...");
+                    _logger.LogDebug($"Received response from Gemini API (length: {responseJson.Length})");
 
                     try
                     {
@@ -519,27 +503,31 @@ namespace Portfolio_server.Services
                     }
                 }
 
-                // Second check: Sentence-level deduplication
-                string[] sentences = Regex.Split(text, @"(?<=[.!?])\s+");
-                var uniqueSentences = new List<string>();
-                var seenSentences = new HashSet<string>();
+                // Second check: Line-level deduplication for bullet points and sentences
+                string[] lines = text.Split('\n');
+                var uniqueLines = new List<string>();
+                var seenLines = new HashSet<string>();
 
-                foreach (var sentence in sentences)
+                foreach (var line in lines)
                 {
-                    string trimmed = sentence.Trim();
-                    if (trimmed.Length > 10 && !seenSentences.Contains(trimmed))
+                    string trimmed = line.Trim();
+                    // For bullet points or lines, check for duplicates
+                    if (trimmed.StartsWith("*") || trimmed.StartsWith("-") || trimmed.StartsWith("•"))
                     {
-                        seenSentences.Add(trimmed);
-                        uniqueSentences.Add(sentence);
+                        if (!seenLines.Contains(trimmed))
+                        {
+                            seenLines.Add(trimmed);
+                            uniqueLines.Add(line);
+                        }
                     }
-                    else if (trimmed.Length <= 10)
+                    else
                     {
-                        // Keep short sentences/fragments
-                        uniqueSentences.Add(sentence);
+                        // For regular text, keep as is
+                        uniqueLines.Add(line);
                     }
                 }
 
-                string deduplicatedText = string.Join(" ", uniqueSentences);
+                string deduplicatedText = string.Join("\n", uniqueLines);
                 
                 // Third check: Paragraph-level deduplication
                 string[] paragraphs = deduplicatedText.Split(new[] { "\n\n" }, StringSplitOptions.RemoveEmptyEntries);
