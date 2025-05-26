@@ -167,8 +167,11 @@ else
 // Use CORS before any other middleware that might return responses
 app.UseCors("AllowFrontend");
 
-// No need for UseHttpsRedirection in Render as they handle SSL termination
-// app.UseHttpsRedirection();
+// Enable HTTPS redirection for production
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
 
 app.UseAuthorization();
 app.MapControllers();
@@ -176,6 +179,7 @@ app.MapControllers();
 // Add a minimal endpoint for testing connectivity
 app.MapGet("/", () => "PortofAI Server is running");
 app.MapGet("/api/ping", () => new { message = "pong", timestamp = DateTime.UtcNow });
+app.MapGet("/api/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
  
 
 Console.WriteLine("Application startup complete. Listening for requests...");
